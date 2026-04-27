@@ -164,7 +164,10 @@ def extract_future_work_sentences(papers: list[dict]) -> list[dict]:
     """
     sentences = []
     for paper in papers:
-        text = (paper.get("abstract") or "") + " " + (paper.get("future_work") or "") + " " + (paper.get("limitations") or "")
+        def _to_str(v) -> str:
+            if isinstance(v, list): return " ".join(str(x) for x in v)
+            return str(v) if v else ""
+        text = _to_str(paper.get("abstract")) + " " + _to_str(paper.get("future_work")) + " " + _to_str(paper.get("limitations"))
         # Simple sentence split
         raw_sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         for sent in raw_sentences:

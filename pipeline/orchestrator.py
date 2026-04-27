@@ -162,7 +162,7 @@ if __name__ == "__main__":
     )
 
     result = run_pipeline(
-        topic="Graph Neural Networks",
+        topic="Prompt Injection in Large Language Models",
         max_papers=50,
         use_rebel=False,
         use_cache=True,

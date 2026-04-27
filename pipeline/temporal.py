@@ -27,13 +27,16 @@ def _get_methods_for_paper(paper: dict) -> list[str]:
     Returns a flat, lowercase list for counting.
     """
     sources = []
-    # LLM-extracted method field
-    if paper.get("method"):
-        # may be comma-separated
-        sources.extend([m.strip().lower() for m in paper["method"].split(",")])
+    # LLM-extracted method field — may be a string or a list
+    method = paper.get("method")
+    if method:
+        if isinstance(method, list):
+            sources.extend([str(m).strip().lower() for m in method if m])
+        else:
+            sources.extend([m.strip().lower() for m in str(method).split(",")])
     # NER-extracted model names
     for m in paper.get("ner_models", []):
-        sources.append(m.strip().lower())
+        sources.append(str(m).strip().lower())
     return [s for s in sources if s]
 
 

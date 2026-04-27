@@ -123,29 +123,33 @@ def embed_papers(
 
     logger.info(f"Embedding {len(papers)} papers with SPECTER2 (field='{field}') …")
 
+    # Safe coercion — some LLM-extracted fields can be None or a list
+    def _s(v) -> str:
+        if v is None: return ""
+        if isinstance(v, list): return " ".join(str(x) for x in v)
+        return str(v)
+
     if field == "abstract":
-        # SPECTER2 expected format: "title [SEP] abstract"
         texts = [
-            p["title"].strip() + " [SEP] " + p["abstract"].strip()
+            _s(p.get("title")) + " [SEP] " + _s(p.get("abstract"))
             for p in papers
         ]
         embeddings = _embed_batch(texts)
 
     elif field == "contribution":
         texts = [
-            p["title"].strip() + " [SEP] " + p.get("key_contribution", p["abstract"]).strip()
+            _s(p.get("title")) + " [SEP] " + (_s(p.get("key_contribution")) or _s(p.get("abstract")))
             for p in papers
         ]
         embeddings = _embed_batch(texts)
 
     elif field == "combined":
-        # Average of abstract embedding and contribution embedding
         texts_abs = [
-            p["title"].strip() + " [SEP] " + p["abstract"].strip()
+            _s(p.get("title")) + " [SEP] " + _s(p.get("abstract"))
             for p in papers
         ]
         texts_con = [
-            p["title"].strip() + " [SEP] " + p.get("key_contribution", p["abstract"]).strip()
+            _s(p.get("title")) + " [SEP] " + (_s(p.get("key_contribution")) or _s(p.get("abstract")))
             for p in papers
         ]
         emb_abs = _embed_batch(texts_abs)

@@ -89,7 +89,7 @@ _EMPTY_FIELDS = {
 
 
 def _extract_batch_llm(papers: list[dict]) -> list[dict]:
-    """Extract fields for a batch of papers using Gemini (JSON mode)."""
+    """Extract fields for a batch of papers using the LLM (JSON mode)."""
     papers_text = ""
     for i, p in enumerate(papers, 1):
         papers_text += f"\n[{i}] Title: {p['title']}\nAbstract: {p['abstract'][:600]}\n"
@@ -97,7 +97,18 @@ def _extract_batch_llm(papers: list[dict]) -> list[dict]:
     prompt = _BATCH_PROMPT.format(n=len(papers), papers_text=papers_text)
     try:
         parsed = generate_json(prompt)
-        results = parsed.get("results", [])
+
+        # LLM may return {"results": [...]} or a bare list [...] 
+        if isinstance(parsed, dict):
+            results = parsed.get("results", [])
+        elif isinstance(parsed, list):
+            results = parsed
+        else:
+            results = []
+
+        # Ensure every item is a dict (LLM sometimes returns strings in the list)
+        results = [r if isinstance(r, dict) else _EMPTY_FIELDS.copy() for r in results]
+
         while len(results) < len(papers):
             results.append(_EMPTY_FIELDS.copy())
         return results[:len(papers)]

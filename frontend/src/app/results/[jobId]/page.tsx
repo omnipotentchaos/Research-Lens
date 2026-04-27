@@ -66,10 +66,9 @@ export default function ResultsPage() {
   const clusters: Cluster[] = Object.values(result.clusters || {}).filter(c => !c.is_noise);
 
   const statCards = [
-    { icon: '📄', label: 'Papers', value: result.metadata.paper_count, color: '#7c3aed', subtext: `${result.metadata.year_range?.[0]}–${result.metadata.year_range?.[1]}` },
-    { icon: '🗂️', label: 'Clusters', value: result.metadata.cluster_count, color: '#2563eb', subtext: `research themes` }, // silhouette ${result.clustering_metrics?.silhouette?.toFixed(2) ?? '—'}
-    { icon: '🕸️', label: 'Graph Nodes', value: result.knowledge_graph?.nodes?.length ?? 0, color: '#0891b2', subtext: `${result.metadata.seminal_paper_count} seminal` },
-    { icon: '✨', label: 'Research Gaps', value: result.gaps?.synthesized_gaps?.length ?? 0, color: '#059669', subtext: `${result.metadata.pipeline_time_seconds?.toFixed(1)}s pipeline` },
+    { icon: '📄', label: 'Papers',         value: result.metadata.paper_count,                    color: '#7c3aed', subtext: `${result.metadata.year_range?.[0]}–${result.metadata.year_range?.[1]}` },
+    { icon: '🗂️', label: 'Clusters',       value: result.metadata.cluster_count,                  color: '#2563eb', subtext: 'research themes' },
+    { icon: '✨',  label: 'Research Gaps', value: result.gaps?.synthesized_gaps?.length ?? 0,     color: '#059669', subtext: `${result.metadata.pipeline_time_seconds?.toFixed(1)}s pipeline` },
   ];
 
   return (

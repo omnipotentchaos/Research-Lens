@@ -1,12 +1,11 @@
 """
 Module 1 — Retrieval
 ---------------------
-Fetches papers from three sources:
-  1. arXiv           — always free, no key needed
-  2. Semantic Scholar — free API key required (get at semanticscholar.org/product/api)
-  3. OpenAlex        — completely free, no key, 250M+ papers indexed
+Fetches papers from two sources:
+  1. Semantic Scholar — API key required (get at semanticscholar.org/product/api)
+  2. OpenAlex        — completely free, no key, 250M+ papers indexed
 
-Papers are deduplicated, quality-filtered, and BM25 re-ranked.
+Papers are deduplicated, quality-filtered, and hybrid BM25+citation re-ranked.
 """
 
 import os
@@ -71,18 +70,18 @@ def _deduplicate(papers: list[dict]) -> list[dict]:
 def expand_query(topic: str) -> list[str]:
     try:
         prompt = (
-            f"Generate 4 alternative academic search queries for the topic: {topic}\n\n"
+            f"Generate 2 alternative academic search queries for the topic: {topic}\n\n"
             f"Rules:\n"
             f"- Each query must be a plain search string (no JSON, no brackets)\n"
             f"- Each query should use different keywords or synonyms\n"
             f"- Return ONLY this exact JSON format, nothing else:\n"
-            f'{{"queries": ["first query", "second query", "third query", "fourth query"]}}'
+            f'{{"queries": ["first query", "second query"]}}'
         )
         parsed = generate_json(prompt)
         raw_queries = []
         for v in parsed.values():
             if isinstance(v, list):
-                raw_queries = v[:4]
+                raw_queries = v[:2]
                 break
 
         # Validate: reject any query that looks like a JSON object/nested structure
@@ -144,7 +143,13 @@ def _fetch_arxiv(query: str, max_results: int = 30, min_year: int = 2018) -> lis
 # Source 2 — Semantic Scholar (direct API, with key)
 # ---------------------------------------------------------------------------
 
-def _fetch_semantic_scholar(query: str, max_results: int = 30, min_year: int = 2018) -> list[dict]:
+def _fetch_semantic_scholar(query: str, max_results: int = 30, min_year: int = 2018,
+                            sort: str = "Relevance") -> list[dict]:
+    """
+    sort='Relevance'    — S2's default text-match ranking.
+    sort='CitationCount' — highest-cited first (rescues foundational papers
+                           whose titles don't overlap with the query).
+    """
     if not SS_API_KEY:
         logger.warning("SEMANTIC_SCHOLAR_API_KEY not set — skipping Semantic Scholar.")
         return []
@@ -153,6 +158,7 @@ def _fetch_semantic_scholar(query: str, max_results: int = 30, min_year: int = 2
     params = {
         "query": query,
         "limit": max_results,
+        "sort": sort,
         "fields": "title,abstract,authors,year,citationCount,influentialCitationCount,references,externalIds,openAccessPdf",
     }
     papers = []
@@ -163,10 +169,17 @@ def _fetch_semantic_scholar(query: str, max_results: int = 30, min_year: int = 2
             data = resp.json()
 
         for item in data.get("data", []):
-            if not item.get("abstract") or not item.get("year"):
+            if not item.get("title") or not item.get("year"):
                 continue
             if item["year"] < min_year:
                 continue
+
+            # Use title as abstract fallback — large technical reports (e.g. "The Llama 3
+            # Herd of Models") are often indexed by S2 without an abstract in the API response.
+            abstract = (item.get("abstract") or "").strip().replace("\n", " ")
+            if not abstract:
+                abstract = item["title"].strip()   # fallback so BM25/embedding still works
+
             arxiv_id = (item.get("externalIds") or {}).get("ArXiv")
             refs = [
                 r["paperId"] for r in (item.get("references") or [])
@@ -180,7 +193,7 @@ def _fetch_semantic_scholar(query: str, max_results: int = 30, min_year: int = 2
                 "arxiv_id": arxiv_id,
                 "ss_id": item.get("paperId"),
                 "title": item["title"].strip(),
-                "abstract": item["abstract"].strip().replace("\n", " "),
+                "abstract": abstract,
                 "authors": [a["name"] for a in (item.get("authors") or [])],
                 "year": item["year"],
                 "citation_count": item.get("citationCount") or 0,
@@ -288,15 +301,50 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
 # ---------------------------------------------------------------------------
 
 def _bm25_rerank(papers: list[dict], topic: str, top_k: int = 50) -> list[dict]:
+    """
+    Hybrid re-ranking: BM25 relevance (0.65) + log-citation score (0.35).
+
+    Pure BM25 buries foundational papers because their abstracts use novel
+    vocabulary — secondary papers that analyse them score higher by repeating
+    the topic term many times. Log-citation rescues landmark papers.
+
+    Log scale is used for citations because the distribution is heavily skewed
+    (e.g. GPT-3: 45 000 citations vs a typical paper: 50 citations).
+    """
+    import math
     if not papers:
         return papers
+
+    # ── BM25 scores ─────────────────────────────────────────────────────────
     tokenized = [p["abstract"].lower().split() for p in papers]
     bm25 = BM25Okapi(tokenized)
-    scores = bm25.get_scores(topic.lower().split())
-    ranked = sorted(zip(scores, papers), key=lambda x: x[0], reverse=True)
+    bm25_raw = bm25.get_scores(topic.lower().split())
+
+    bm25_max = max(bm25_raw) if max(bm25_raw) > 0 else 1.0
+    bm25_norm = [s / bm25_max for s in bm25_raw]          # → [0, 1]
+
+    # ── Log-citation scores ──────────────────────────────────────────────────
+    cite_log = [math.log1p(p.get("citation_count") or 0) for p in papers]
+    cite_max = max(cite_log) if max(cite_log) > 0 else 1.0
+    cite_norm = [s / cite_max for s in cite_log]           # → [0, 1]
+
+    # ── Hybrid score ─────────────────────────────────────────────────────────
+    ALPHA = 0.65   # BM25 weight  (relevance)
+    BETA  = 0.35   # citation weight (influence / foundational importance)
+
+    hybrid = [
+        ALPHA * bm + BETA * cn
+        for bm, cn in zip(bm25_norm, cite_norm)
+    ]
+
+    ranked = sorted(zip(hybrid, papers), key=lambda x: x[0], reverse=True)
     selected = [p for _, p in ranked[:top_k]]
-    logger.info(f"BM25 re-ranking: {len(papers)} → {len(selected)} papers")
+    logger.info(
+        f"Hybrid re-ranking (BM25×{ALPHA} + citation×{BETA}): "
+        f"{len(papers)} → {len(selected)} papers"
+    )
     return selected
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -310,8 +358,8 @@ def retrieve_papers(
     use_cache: bool = True,
 ) -> list[dict]:
     """
-    Main entry point. Returns deduplicated, BM25-ranked papers from
-    arXiv + Semantic Scholar + OpenAlex.
+    Main entry point. Returns deduplicated, hybrid-ranked papers from
+    Semantic Scholar + OpenAlex (arXiv excluded — indexed via S2).
     """
     if use_cache:
         cached = _load_cache(topic)
@@ -326,11 +374,10 @@ def retrieve_papers(
 
     all_papers: list[dict] = []
     for q in queries:
-        all_papers.extend(_fetch_arxiv(q, max_results=25, min_year=min_year))
+        # arXiv removed — rate-limits aggressively and S2 already indexes arXiv papers
+        all_papers.extend(_fetch_semantic_scholar(q, max_results=50, min_year=min_year))
         time.sleep(0.5)
-        all_papers.extend(_fetch_semantic_scholar(q, max_results=25, min_year=min_year))
-        time.sleep(0.5)
-        all_papers.extend(_fetch_openalex(q, max_results=25, min_year=min_year))
+        all_papers.extend(_fetch_openalex(q, max_results=50, min_year=min_year))
         time.sleep(0.5)
 
     logger.info(f"Total raw papers: {len(all_papers)}")
@@ -338,32 +385,84 @@ def retrieve_papers(
     all_papers = _deduplicate(all_papers)
     logger.info(f"After dedup: {len(all_papers)}")
 
-    # Quality filter (citation filter only for SS/OA papers; arXiv has no citation data)
+    # Quality filter — year-aware citation threshold
+    # Recent papers (last 2 years) haven't had time to accumulate citations,
+    # so we relax the threshold for them.
+    from datetime import datetime
+    current_year = datetime.now().year
     filtered = []
     for p in all_papers:
         if not p.get("abstract"):
             continue
-        if p["source"] != "arxiv" and p["citation_count"] < min_citations:
+        paper_year = p.get("year") or 0
+        # Relax citation filter for recent papers (last 2 years)
+        effective_min = 0 if paper_year >= current_year - 1 else min_citations
+        if p["source"] != "arxiv" and p["citation_count"] < effective_min:
             continue
         filtered.append(p)
     logger.info(f"After quality filter: {len(filtered)}")
 
     # Step 5: Keyword relevance guard
-    # Keep only papers whose abstract contains at least 1 significant topic word.
-    # This removes generic NLP papers that slip through on broad queries.
-    _STOPWORDS = {"in", "for", "the", "of", "a", "an", "with", "and", "on", "to", "using", "based"}
-    topic_keywords = [w.lower() for w in topic.split() if w.lower() not in _STOPWORDS and len(w) > 3]
+    # Require the top-2 most SPECIFIC topic words to BOTH appear in title or abstract.
+    # Specificity heuristic:
+    #   - Proper nouns / model names (contain uppercase or digits in original query)
+    #     are the MOST specific, regardless of length. e.g. "XLNet" > "autoregressive"
+    #   - Among remaining words, longer = more specific
+    # Threshold is len >= 2 so short acronyms like "gpt", "rag", "llm" still qualify.
+    _STOPWORDS = {"in", "for", "the", "of", "a", "an", "with", "and", "on", "to",
+                  "using", "based", "from", "via", "its", "their", "this", "that"}
+    # Strip trailing punctuation (e.g. "XLNet:" → "XLNet")
+    import re as _re
+    raw_words = [_re.sub(r'[^\w]', '', w) for w in topic.split()]
+    raw_words = [w for w in raw_words if w and w.lower() not in _STOPWORDS and len(w) >= 2]
+
+    def _specificity(word: str) -> int:
+        """Proper nouns / model names score higher than generic words."""
+        has_upper = any(c.isupper() for c in word[1:])   # uppercase beyond first char
+        has_digit = any(c.isdigit() for c in word)        # e.g. GPT-4, Llama3
+        is_all_caps = word == word.upper() and len(word) <= 6  # acronyms: RAG, LLM, NER
+        boost = 100 if (has_upper or has_digit or is_all_caps) else 0
+        return boost + len(word)
+
+    topic_keywords = sorted(
+        [w.lower() for w in sorted(raw_words, key=_specificity, reverse=True)],
+    )
+    # Deduplicate while preserving specificity order
+    seen = set()
+    unique_keywords = []
+    for w in [w.lower() for w in sorted(raw_words, key=_specificity, reverse=True)]:
+        if w not in seen:
+            seen.add(w)
+            unique_keywords.append(w)
+    topic_keywords = unique_keywords
+
     if topic_keywords:
-        keyword_filtered = [
-            p for p in filtered
-            if any(kw in p["abstract"].lower() for kw in topic_keywords)
-        ]
-        # Only apply if it doesn't wipe out too many papers
-        if len(keyword_filtered) >= max_papers // 2:
-            logger.info(f"After keyword guard: {len(keyword_filtered)} (was {len(filtered)})")
-            filtered = keyword_filtered
+        # Progressive keyword guard: try AND, then OR, then skip
+        required = topic_keywords[:2] if len(topic_keywords) >= 2 else topic_keywords[:1]
+        logger.info(f"Keyword guard — anchors: {required}")
+
+        def _kw_in_paper(p: dict, kw: str) -> bool:
+            return (kw in (p.get("abstract") or "").lower() or
+                    kw in (p.get("title") or "").lower())
+
+        # Tier 1: ALL required keywords (AND)
+        and_filtered = [p for p in filtered if all(_kw_in_paper(p, kw) for kw in required)]
+
+        if len(and_filtered) >= max_papers // 2:
+            logger.info(f"Keyword guard (AND): {len(and_filtered)} papers (was {len(filtered)})")
+            filtered = and_filtered
+        elif len(required) > 1:
+            # Tier 2: ANY required keyword (OR) — keeps papers mentioning at least one anchor
+            or_filtered = [p for p in filtered if any(_kw_in_paper(p, kw) for kw in required)]
+
+            if len(or_filtered) >= max_papers // 2:
+                logger.info(f"Keyword guard (OR): {len(or_filtered)} papers (was {len(filtered)})")
+                filtered = or_filtered
+            else:
+                logger.info(f"Keyword guard skipped (OR would leave only {len(or_filtered)})")
         else:
-            logger.info(f"Keyword guard skipped (would leave only {len(keyword_filtered)} papers)")
+            logger.info(f"Keyword guard skipped (would leave only {len(and_filtered)})")
+
 
     final = _bm25_rerank(filtered, topic, top_k=max_papers)
     for i, p in enumerate(final):
