@@ -13,11 +13,11 @@ const EXAMPLE_TOPICS = [
 ];
 
 const FEATURES = [
-  { emoji: '📚', label: 'Smart Retrieval', desc: 'arXiv + OpenAlex across expanded query variants' },
+  { emoji: '📚', label: 'Smart Retrieval', desc: 'Semantic Scholar + OpenAlex across LLM-expanded query variants' },
   { emoji: '🔬', label: 'SPECTER2 Clustering', desc: 'Citation-aware embeddings + UMAP/HDBSCAN' },
-  { emoji: '🕸️', label: 'Knowledge Graph', desc: 'Interactive graph of papers, methods & relations' },
   { emoji: '📈', label: 'Temporal Evolution', desc: 'Track method emergence & field drift over time' },
-  { emoji: '✨', label: 'Research Gaps', desc: 'LLM-synthesised gaps from future-work analysis' },
+  { emoji: '✨', label: 'Research Gaps', desc: 'LLM-synthesised gaps from KDE geometry + future-work analysis' },
+  { emoji: '🔍', label: 'Deep Extraction', desc: 'Llama 3.3 70B extracts methods, datasets & key contributions' },
   { emoji: '⚡', label: 'Fast & Cached', desc: 'Under 20s on repeat queries with smart caching' },
 ];
 

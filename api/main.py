@@ -4,8 +4,13 @@ FastAPI application — ResearchLens API
 Routes:
   POST /api/research      → enqueue pipeline job, returns job_id
   GET  /api/status/{id}   → poll job status + result
-  GET  /api/papers/{topic} → return cached papers for a topic
+  GET  /api/jobs          → list all jobs (debugging)
   GET  /health            → liveness check
+
+Job persistence:
+  Each job is written to data/jobs/{job_id}.json on every update.
+  On server startup, all existing job files are loaded back into memory.
+  Jobs older than JOB_TTL_HOURS (default 1h) are cleaned up automatically.
 """
 
 try:
@@ -21,15 +26,16 @@ except ImportError:
     sys.exit(1)
 
 import uuid
+import json
+import time
 import logging
 import asyncio
 from pathlib import Path
 from typing import Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.schemas import ResearchRequest, JobStatus
@@ -41,8 +47,104 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# In-memory job store (replace with Redis/Supabase for production)
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+JOBS_DIR = Path("data/jobs")          # one JSON file per job
+JOB_TTL_HOURS = 1                     # delete jobs older than this
+CLEANUP_INTERVAL_SECONDS = 600        # run cleanup every 10 minutes
+
+# In-memory job store — seeded from disk on startup
 _jobs: dict[str, dict[str, Any]] = {}
+
+# Per-job WebSocket event queues — frontend subscribes to receive real-time progress
+_ws_queues: dict[str, list[asyncio.Queue]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Disk persistence helpers
+# ---------------------------------------------------------------------------
+
+def _job_path(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def _save_job(job_id: str) -> None:
+    """Write a single job to disk (non-blocking write, called after every update)."""
+    try:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        _job_path(job_id).write_text(
+            json.dumps(job, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"Could not persist job {job_id} to disk: {e}")
+
+
+def _load_jobs_from_disk() -> None:
+    """
+    On startup, reload all job JSON files from data/jobs/.
+    Jobs that are still 'running' (server crashed mid-run) are marked 'error'.
+    """
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    loaded = 0
+    for f in JOBS_DIR.glob("*.json"):
+        try:
+            job = json.loads(f.read_text(encoding="utf-8"))
+            job_id = job.get("job_id")
+            if not job_id:
+                continue
+            # If server crashed while this job was running, mark it failed
+            if job.get("status") in ("running", "queued"):
+                job["status"] = "error"
+                job["error"] = "Server restarted while job was running."
+                job["current_step"] = "Error"
+                f.write_text(json.dumps(job, ensure_ascii=False, default=str), encoding="utf-8")
+            _jobs[job_id] = job
+            loaded += 1
+        except Exception as e:
+            logger.warning(f"Could not load job file {f.name}: {e}")
+    if loaded:
+        logger.info(f"Loaded {loaded} jobs from disk.")
+
+
+def _delete_job(job_id: str) -> None:
+    """Remove a job from memory and disk."""
+    _jobs.pop(job_id, None)
+    path = _job_path(job_id)
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception as e:
+        logger.warning(f"Could not delete job file {job_id}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# TTL cleanup
+# ---------------------------------------------------------------------------
+
+async def _cleanup_loop() -> None:
+    """
+    Background coroutine: every CLEANUP_INTERVAL_SECONDS, delete jobs whose
+    'created_at' timestamp is older than JOB_TTL_HOURS.
+    Only completed/errored jobs are cleaned up — running jobs are never deleted.
+    """
+    ttl_seconds = JOB_TTL_HOURS * 3600
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+        now = time.time()
+        expired = [
+            jid for jid, j in list(_jobs.items())
+            if j.get("status") in ("done", "error")
+            and (now - j.get("created_at", now)) > ttl_seconds
+        ]
+        for jid in expired:
+            _delete_job(jid)
+        if expired:
+            logger.info(f"TTL cleanup: removed {len(expired)} expired jobs.")
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +155,19 @@ _jobs: dict[str, dict[str, Any]] = {}
 async def lifespan(app: FastAPI):
     logger.info("ResearchLens API starting up …")
     Path("data").mkdir(exist_ok=True)
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    _load_jobs_from_disk()
+    # Start TTL cleanup background task
+    cleanup_task = asyncio.create_task(_cleanup_loop())
     yield
+    cleanup_task.cancel()
     logger.info("ResearchLens API shutting down.")
 
 
 app = FastAPI(
     title="ResearchLens API",
     description="Automated research paper analysis pipeline",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -72,21 +179,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve knowledge graph HTML
 Path("data").mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory="data"), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Job management helpers
+# ---------------------------------------------------------------------------
+
+def _update_job(job_id: str, **kwargs) -> None:
+    """Update job fields in memory, persist to disk, and push to WebSocket subscribers."""
+    _jobs[job_id].update(kwargs)
+    _save_job(job_id)
+    # Push progress event to all WebSocket subscribers for this job
+    event = {
+        "status": _jobs[job_id].get("status"),
+        "progress": _jobs[job_id].get("progress"),
+        "current_step": _jobs[job_id].get("current_step"),
+    }
+    for q in _ws_queues.get(job_id, []):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # subscriber is slow, skip this update
 
 
 # ---------------------------------------------------------------------------
 # Background pipeline runner
 # ---------------------------------------------------------------------------
 
-def _update_job(job_id: str, **kwargs):
-    _jobs[job_id].update(kwargs)
-
-
-async def _run_pipeline_job(job_id: str, request: ResearchRequest):
-    """Async wrapper that runs the pipeline in a thread pool."""
+async def _run_pipeline_job(job_id: str, request: ResearchRequest) -> None:
+    """Async wrapper that runs the blocking pipeline in a thread pool."""
     import concurrent.futures
     from pipeline.orchestrator import run_pipeline
 
@@ -155,7 +278,11 @@ def _serialise_result(result: dict) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "jobs_in_memory": len(_jobs)}
+    return {
+        "status": "ok",
+        "jobs_in_memory": len(_jobs),
+        "jobs_on_disk": len(list(JOBS_DIR.glob("*.json"))),
+    }
 
 
 @app.post("/api/research", response_model=JobStatus, status_code=202)
@@ -173,7 +300,9 @@ async def start_research(request: ResearchRequest, background_tasks: BackgroundT
         "result": None,
         "error": None,
         "topic": request.topic,
+        "created_at": time.time(),   # used for TTL cleanup
     }
+    _save_job(job_id)   # persist immediately so the job survives a crash even before it starts
     background_tasks.add_task(_run_pipeline_job, job_id, request)
     logger.info(f"Job {job_id} queued for topic: '{request.topic}'")
     return _jobs[job_id]
@@ -181,33 +310,95 @@ async def start_research(request: ResearchRequest, background_tasks: BackgroundT
 
 @app.get("/api/status/{job_id}", response_model=JobStatus)
 async def get_status(job_id: str):
-    """Poll job status. When status='done', result is included."""
+    """
+    Poll job status. When status='done', result is included.
+    Falls back to disk if the job was evicted from memory (e.g. after restart).
+    """
     if job_id not in _jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
+        # Try loading from disk (e.g. after a server restart)
+        path = _job_path(job_id)
+        if path.exists():
+            try:
+                job = json.loads(path.read_text(encoding="utf-8"))
+                _jobs[job_id] = job   # cache back into memory
+            except Exception:
+                raise HTTPException(status_code=404, detail="Job not found")
+        else:
+            raise HTTPException(status_code=404, detail="Job not found")
     return _jobs[job_id]
-
-
-@app.get("/api/graph/{job_id}")
-async def get_graph_html(job_id: str):
-    """Return the interactive knowledge graph HTML for a completed job."""
-    if job_id not in _jobs:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job = _jobs[job_id]
-    if job["status"] != "done":
-        raise HTTPException(status_code=202, detail="Job not complete yet")
-    html_path = Path("data/knowledge_graph.html")
-    if not html_path.exists():
-        raise HTTPException(status_code=404, detail="Graph not generated")
-    return FileResponse(str(html_path), media_type="text/html")
 
 
 @app.get("/api/jobs")
 async def list_jobs():
-    """List all jobs (for debugging)."""
+    """List all in-memory jobs with basic metadata (for debugging)."""
     return [
-        {"job_id": jid, "status": j["status"], "topic": j.get("topic"), "progress": j["progress"]}
+        {
+            "job_id": jid,
+            "status": j["status"],
+            "topic": j.get("topic"),
+            "progress": j["progress"],
+            "created_at": j.get("created_at"),
+        }
         for jid, j in _jobs.items()
     ]
+
+
+@app.delete("/api/jobs/{job_id}", status_code=204)
+async def delete_job(job_id: str):
+    """Manually delete a job from memory and disk."""
+    if job_id not in _jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    _delete_job(job_id)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket progress streaming
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/progress/{job_id}")
+async def ws_progress(websocket: WebSocket, job_id: str):
+    """
+    Real-time progress streaming via WebSocket.
+    The client connects and receives JSON events:
+      {"status": "running", "progress": 40, "current_step": "Embedding + Clustering ..."}
+    Connection closes when the job reaches 'done' or 'error'.
+    """
+    await websocket.accept()
+
+    # Create a queue for this subscriber
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    if job_id not in _ws_queues:
+        _ws_queues[job_id] = []
+    _ws_queues[job_id].append(queue)
+
+    try:
+        # Send current state immediately
+        if job_id in _jobs:
+            job = _jobs[job_id]
+            await websocket.send_json({
+                "status": job.get("status"),
+                "progress": job.get("progress"),
+                "current_step": job.get("current_step"),
+            })
+            # If already done, send result and close
+            if job.get("status") in ("done", "error"):
+                await websocket.close()
+                return
+
+        # Stream events as they arrive
+        while True:
+            event = await asyncio.wait_for(queue.get(), timeout=120)
+            await websocket.send_json(event)
+            if event.get("status") in ("done", "error"):
+                break
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
+        # Unsubscribe
+        if job_id in _ws_queues:
+            _ws_queues[job_id] = [q for q in _ws_queues[job_id] if q is not queue]
+            if not _ws_queues[job_id]:
+                del _ws_queues[job_id]
 
 
 # ---------------------------------------------------------------------------

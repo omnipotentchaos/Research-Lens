@@ -19,21 +19,11 @@ from typing import Optional
 import umap
 import hdbscan
 from sklearn.metrics import silhouette_score, davies_bouldin_score
-from groq import Groq
 from pipeline._llm import generate_text, generate_json
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-
-_groq_client: Optional[Groq] = None
-
-
-def _get_groq() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _groq_client
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +130,7 @@ def evaluate_clustering(reduced: np.ndarray, labels: np.ndarray) -> dict:
 
 def _label_all_clusters(cluster_groups: dict[int, list[dict]]) -> dict[int, str]:
     """
-    Label ALL clusters in a single Gemini call.
+    Label ALL clusters in a single Cerebras call.
     Saves N-1 API calls vs calling once per cluster.
     Returns {cluster_id: label_string}
     """
@@ -170,7 +160,7 @@ def label_clusters(
     reduced,
 ) -> dict[int, dict]:
     """
-    Generate LLM labels for each cluster in ONE batched Gemini call.
+    Generate LLM labels for each cluster in ONE batched Cerebras call.
     Returns {cluster_id: {label, paper_ids, centroid, paper_count}}
     """
     cluster_ids = sorted(set(labels))

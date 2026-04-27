@@ -16,11 +16,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-import arxiv
 import httpx
 from rank_bm25 import BM25Okapi
 from fuzzywuzzy import fuzz
-from groq import Groq
 from pipeline._llm import generate_json
 from dotenv import load_dotenv
 
@@ -64,35 +62,76 @@ def _deduplicate(papers: list[dict]) -> list[dict]:
     return unique
 
 # ---------------------------------------------------------------------------
-# Query expansion via Groq
+# Query expansion
 # ---------------------------------------------------------------------------
 
+def _looks_like_paper_title(text: str) -> bool:
+    """
+    Heuristic: detect if the user pasted a paper title rather than a topic.
+    Paper titles tend to be long, contain colons, and have Title Case proper nouns.
+    """
+    words = text.split()
+    if len(words) < 6:
+        return False
+
+    # Strong signals: contains a colon (very common in paper titles)
+    has_colon = ":" in text
+
+    # Count capitalised non-stopword words (Title Case pattern)
+    _stop = {"a", "an", "the", "in", "for", "of", "and", "with", "on", "to", "via", "using"}
+    capitalised = sum(1 for w in words if w[0].isupper() and w.lower() not in _stop)
+    cap_ratio = capitalised / len(words)
+
+    # Paper titles: long + (colon OR high Title Case ratio)
+    if len(words) >= 8 and (has_colon or cap_ratio > 0.6):
+        return True
+    return False
+
+
 def expand_query(topic: str) -> list[str]:
+    is_title = _looks_like_paper_title(topic)
+    if is_title:
+        logger.info(f"Detected paper title — switching to 'find related papers' mode")
+
     try:
-        prompt = (
-            f"Generate 2 alternative academic search queries for the topic: {topic}\n\n"
-            f"Rules:\n"
-            f"- Each query must be a plain search string (no JSON, no brackets)\n"
-            f"- Each query should use different keywords or synonyms\n"
-            f"- Return ONLY this exact JSON format, nothing else:\n"
-            f'{{"queries": ["first query", "second query"]}}'
-        )
+        if is_title:
+            # Paper title mode: ask LLM to extract the core research topic
+            prompt = (
+                f"The user pasted a paper title: \"{topic}\"\n\n"
+                f"Extract the core research topic and generate 3 short search queries "
+                f"that would find RELATED papers on the same topic.\n\n"
+                f"Rules:\n"
+                f"- Each query should be 3-6 words (a topic, not a title)\n"
+                f"- Focus on the paper's research area, not the paper itself\n"
+                f"- Return ONLY this JSON format:\n"
+                f'  {{"topic": "short core topic", "queries": ["query1", "query2", "query3"]}}'
+            )
+        else:
+            # Normal topic mode
+            prompt = (
+                f"Generate 2 alternative academic search queries for the topic: {topic}\n\n"
+                f"Rules:\n"
+                f"- Each query must be a plain search string (no JSON, no brackets)\n"
+                f"- Each query should use different keywords or synonyms\n"
+                f"- Return ONLY this exact JSON format, nothing else:\n"
+                f'{{"queries": ["first query", "second query"]}}'
+            )
+
         parsed = generate_json(prompt)
         raw_queries = []
         for v in parsed.values():
             if isinstance(v, list):
-                raw_queries = v[:2]
+                raw_queries = v[:3] if is_title else v[:2]
                 break
 
         # Validate: reject any query that looks like a JSON object/nested structure
         clean_queries = []
         for q in raw_queries:
             q = str(q).strip()
-            # Skip if model returned JSON instead of a plain string
             if q.startswith("{") or q.startswith("[") or q.startswith("("):
                 logger.warning(f"Query expansion: skipping malformed query: {q[:60]}")
                 continue
-            if len(q) > 10:
+            if len(q) > 5:
                 clean_queries.append(q)
 
         if clean_queries:

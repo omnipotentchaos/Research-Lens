@@ -2,12 +2,11 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { pollStatus } from '@/lib/api';
+import { pollStatus, getWsProgressUrl } from '@/lib/api';
 import { JobStatus, PipelineResult, Cluster } from '@/lib/types';
 import ClusterPlot from '@/components/ClusterPlot';
 import TimelineChart from '@/components/TimelineChart';
 import GapCards from '@/components/GapCards';
-import PaperList from '@/components/PaperList';
 import TopPapers from '@/components/TopPapers';
 import StatCard from '@/components/StatCard';
 
@@ -16,7 +15,6 @@ const STEPS = [
   { label: 'Extracting information', match: 'extracting' },
   { label: 'Embedding + Clustering', match: 'embedding' },
   { label: 'Temporal analysis',      match: 'temporal' },
-  { label: 'Building knowledge graph', match: 'building' },
   { label: 'Detecting research gaps',  match: 'detecting' },
 ];
 
@@ -42,20 +40,69 @@ export default function ResultsPage() {
   const router = useRouter();
   const [job, setJob] = useState<JobStatus | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('clusters');
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Track which tabs have been visited — show skeleton on first visit
+  const [mountedTabs, setMountedTabs] = useState<Set<TabId>>(new Set(['clusters']));
 
+  function handleTabClick(id: TabId) {
+    setActiveTab(id);
+    setMountedTabs(prev => new Set([...prev, id]));
+  }
+
+  // --- WebSocket progress streaming (with polling fallback) ---
   useEffect(() => {
     if (!jobId) return;
-    const fetch = async () => {
-      const status = await pollStatus(jobId as string);
-      setJob(status);
-      if (status.status === 'done' || status.status === 'error') {
-        if (pollRef.current) clearInterval(pollRef.current);
-      }
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let fallbackPoll: ReturnType<typeof setInterval> | null = null;
+
+    // Fetch initial state via REST
+    pollStatus(jobId as string).then(status => {
+      if (!cancelled) setJob(status);
+    });
+
+    // Try WebSocket first
+    try {
+      ws = new WebSocket(getWsProgressUrl(jobId as string));
+      ws.onmessage = (evt) => {
+        const event = JSON.parse(evt.data);
+        setJob(prev => prev ? { ...prev, ...event } : prev);
+        if (event.status === 'done' || event.status === 'error') {
+          // Fetch full result via REST (WS only sends progress, not full result)
+          pollStatus(jobId as string).then(status => {
+            if (!cancelled) setJob(status);
+          });
+        }
+      };
+      ws.onerror = () => {
+        // WebSocket failed — fall back to polling
+        ws?.close();
+        ws = null;
+        if (!fallbackPoll) {
+          fallbackPoll = setInterval(async () => {
+            const status = await pollStatus(jobId as string);
+            if (!cancelled) setJob(status);
+            if (status.status === 'done' || status.status === 'error') {
+              if (fallbackPoll) clearInterval(fallbackPoll);
+            }
+          }, 2500);
+        }
+      };
+    } catch {
+      // WebSocket not available — use polling
+      fallbackPoll = setInterval(async () => {
+        const status = await pollStatus(jobId as string);
+        if (!cancelled) setJob(status);
+        if (status.status === 'done' || status.status === 'error') {
+          if (fallbackPoll) clearInterval(fallbackPoll);
+        }
+      }, 2500);
+    }
+
+    return () => {
+      cancelled = true;
+      ws?.close();
+      if (fallbackPoll) clearInterval(fallbackPoll);
     };
-    fetch();
-    pollRef.current = setInterval(fetch, 2500);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [jobId]);
 
   if (!job) return <CenteredSpinner message="Connecting…" />;
@@ -69,6 +116,8 @@ export default function ResultsPage() {
     { icon: '📄', label: 'Papers',         value: result.metadata.paper_count,                    color: '#7c3aed', subtext: `${result.metadata.year_range?.[0]}–${result.metadata.year_range?.[1]}` },
     { icon: '🗂️', label: 'Clusters',       value: result.metadata.cluster_count,                  color: '#2563eb', subtext: 'research themes' },
     { icon: '✨',  label: 'Research Gaps', value: result.gaps?.synthesized_gaps?.length ?? 0,     color: '#059669', subtext: `${result.metadata.pipeline_time_seconds?.toFixed(1)}s pipeline` },
+    { icon: '📊', label: 'Silhouette',     value: result.clustering_metrics?.silhouette != null ? result.clustering_metrics.silhouette.toFixed(3) : 'N/A',  color: '#0891b2', subtext: 'higher = better (-1 to 1)' },
+    { icon: '📏', label: 'Davies-Bouldin', value: result.clustering_metrics?.davies_bouldin != null ? result.clustering_metrics.davies_bouldin.toFixed(3) : 'N/A', color: '#d97706', subtext: 'lower = tighter clusters' },
   ];
 
   return (
@@ -103,7 +152,7 @@ export default function ResultsPage() {
             <button
               key={id}
               id={`tab-${id}`}
-              onClick={() => setActiveTab(id)}
+              onClick={() => handleTabClick(id)}
               style={{
                 flex: 1, padding: '9px 16px', borderRadius: 10, fontSize: 13, fontWeight: 500, border: 'none', cursor: 'pointer', transition: 'all 0.2s', whiteSpace: 'nowrap', fontFamily: 'inherit',
                 background: activeTab === id ? '#7c3aed' : 'transparent',
@@ -116,14 +165,46 @@ export default function ResultsPage() {
           ))}
         </div>
 
-        {/* Tab content */}
+        {/* Tab content — skeleton shows on first visit to each tab */}
         <div className="animate-fadeUp">
-          {activeTab === 'clusters' && <ClusterPlot result={result} clusters={clusters} />}
-          {activeTab === 'timeline' && <TimelineChart temporal={result.temporal} />}
-          {activeTab === 'gaps' && <GapCards gaps={result.gaps?.synthesized_gaps ?? []} />}
-          {activeTab === 'graph' && <TopPapers papers={result.papers} clusters={clusters} />}
+          {activeTab === 'clusters' && (
+            mountedTabs.has('clusters')
+              ? <ClusterPlot result={result} clusters={clusters} />
+              : <TabSkeleton />
+          )}
+          {activeTab === 'timeline' && (
+            mountedTabs.has('timeline')
+              ? <TimelineChart temporal={result.temporal} />
+              : <TabSkeleton />
+          )}
+          {activeTab === 'gaps' && (
+            mountedTabs.has('gaps')
+              ? <GapCards gaps={result.gaps?.synthesized_gaps ?? []} />
+              : <TabSkeleton />
+          )}
+          {activeTab === 'graph' && (
+            mountedTabs.has('graph')
+              ? <TopPapers papers={result.papers} clusters={clusters} />
+              : <TabSkeleton />
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function TabSkeleton() {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <style>{`@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }`}</style>
+      {[300, 180, 240, 200].map((w, i) => (
+        <div key={i} style={{
+          height: i === 0 ? 240 : 80, borderRadius: 14,
+          background: 'linear-gradient(90deg, rgba(30,41,59,0.6) 25%, rgba(51,65,85,0.35) 50%, rgba(30,41,59,0.6) 75%)',
+          backgroundSize: '200% 100%',
+          animation: `shimmer 1.4s ease-in-out ${i * 0.12}s infinite`,
+        }} />
+      ))}
     </div>
   );
 }
@@ -202,6 +283,7 @@ function PipelineProgress({ job }: { job: JobStatus }) {
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.4; transform:scale(0.7); } }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
       `}</style>
     </div>
   );

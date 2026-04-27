@@ -2,9 +2,9 @@
 Module 2 — Information Extraction
 -----------------------------------
 Three-layer extraction for each paper:
-  2a. LLM structured extraction via Groq (Llama 3.3 70B) → JSON schema
+  2a. LLM structured extraction via Cerebras (Llama 3.3 70B) → JSON schema
   2b. spaCy NER → MODEL / DATASET / METRIC entity nodes
-  2c. REBEL relation extraction → typed triplets for knowledge graph edges
+  2c. REBEL relation extraction → typed triplets (optional, CPU-slow)
 """
 
 import os
@@ -18,7 +18,6 @@ from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import spacy
-from groq import Groq
 from pipeline._llm import generate_json
 from transformers import pipeline as hf_pipeline
 from dotenv import load_dotenv
@@ -30,16 +29,8 @@ logger = logging.getLogger(__name__)
 # Initialise models once at import time (heavy — cached after first load)
 # ---------------------------------------------------------------------------
 
-_groq_client: Optional[Groq] = None
 _rebel_pipeline = None
 _spacy_nlp = None
-
-
-def _get_groq() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _groq_client
 
 
 def _get_rebel():
@@ -288,13 +279,13 @@ def extract_paper_info(paper: dict, use_rebel: bool = True) -> dict:
 def extract_all_papers(
     papers: list[dict],
     use_rebel: bool = False,
-    batch_size: int = 8,    # llama3.1-8b has 8k context — keep batches small to avoid truncation
-    max_workers: int = 1,   # fully sequential — no burst risk with the free tier
+    batch_size: int = 8,    # llama3.3-70b has 128k context but we batch conservatively for JSON reliability
+    max_workers: int = 1,   # fully sequential — safe within Cerebras free-tier rate limits
 ) -> list[dict]:
     """
-    Extract structured info using Cerebras (llama3.1-8b).
+    Extract structured info using Cerebras (Llama 3.3 70B).
     Sequential batches of 8 papers each → ~7 LLM calls for 50 papers.
-    Small batch size prevents JSON truncation on the 8k-context model.
+    Small batch size prevents JSON truncation and parsing errors.
     """
     cache = _load_extract_cache()
     enriched: list = [None] * len(papers)
@@ -364,7 +355,7 @@ def extract_all_papers(
 
         _save_extract_cache(cache)
 
-        # Gemini has 1M TPM — no sleep needed between rounds
+        # No sleep needed between rounds — Cerebras free tier handles sequential calls well
 
     # Fill NER for any cached papers that were missing it
     for i, paper in enumerate(papers):

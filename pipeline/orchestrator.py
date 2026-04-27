@@ -1,7 +1,9 @@
 """
 Orchestrator — Runs the full ResearchLens pipeline end-to-end.
-Chains: Retrieval → Extraction → Embedding → Clustering →
-        Temporal → Knowledge Graph → Gap Detection → unified JSON output.
+Chains: Retrieval → Extraction → Embedding & Clustering →
+        Temporal Analysis → Gap Detection → unified JSON output.
+
+Five discrete modules. Knowledge Graph removed (not in production pipeline).
 """
 
 import logging
@@ -14,7 +16,7 @@ from pipeline.extraction import extract_all_papers
 from pipeline.embedding import embed_papers
 from pipeline.clustering import run_clustering
 from pipeline.temporal import analyze_temporal
-from pipeline.knowledge_graph import build_and_export_graph
+# knowledge_graph import removed — KG not part of the 5-module pipeline
 from pipeline.gap_detection import detect_gaps
 
 logger = logging.getLogger(__name__)
@@ -26,7 +28,6 @@ def run_pipeline(
     min_year: int = 2018,
     use_rebel: bool = False,
     use_cache: bool = True,
-    output_dir: str = "data",
     on_progress=None,   # callable(step: str, pct: int)
 ) -> dict:
     """
@@ -38,7 +39,6 @@ def run_pipeline(
         min_year: Earliest paper year to include.
         use_rebel: Whether to run REBEL relation extraction (slow on CPU).
         use_cache: Use cached retrieval + embeddings if available.
-        output_dir: Directory to save knowledge graph HTML.
 
     Returns:
         Unified JSON-serialisable dict with all pipeline outputs.
@@ -52,7 +52,7 @@ def run_pipeline(
 
     # ── Module 1: Retrieval ────────────────────────────────────────
     _progress("Retrieving papers …", 5)
-    logger.info("\n[1/6] Retrieving papers …")
+    logger.info("\n[1/5] Retrieving papers …")
     papers = retrieve_papers(topic, max_papers=max_papers, min_year=min_year, use_cache=use_cache)
     logger.info(f"  ✓ {len(papers)} papers retrieved")
 
@@ -61,13 +61,13 @@ def run_pipeline(
 
     # ── Module 2: Extraction ───────────────────────────────────────
     _progress("Extracting information …", 18)
-    logger.info("\n[2/6] Extracting information …")
+    logger.info("\n[2/5] Extracting information …")
     papers = extract_all_papers(papers, use_rebel=use_rebel)
     logger.info(f"  ✓ Extraction complete ({len(papers)} papers)")
 
     # ── Module 3: Embeddings + Clustering ─────────────────────────
     _progress("Embedding + Clustering …", 40)
-    logger.info("\n[3/6] Embedding + Clustering …")
+    logger.info("\n[3/5] Embedding + Clustering …")
     embeddings = embed_papers(papers, topic=topic, field="combined")
     cluster_result = run_clustering(papers, embeddings)
     logger.info(
@@ -77,24 +77,29 @@ def run_pipeline(
 
     # ── Module 4: Temporal Analysis ───────────────────────────────
     _progress("Temporal analysis …", 60)
-    logger.info("\n[4/6] Temporal analysis …")
+    logger.info("\n[4/5] Temporal analysis …")
     temporal = analyze_temporal(papers, embeddings)
     logger.info(f"  ✓ {len(temporal['timeline'])} years analysed")
 
-    # ── Module 5: Knowledge Graph ──────────────────────────────────
-    _progress("Building knowledge graph …", 75)
-    logger.info("\n[5/6] Building knowledge graph …")
-    kg_result = build_and_export_graph(papers, cluster_result, output_dir=output_dir)
-    seminal = kg_result["seminal_papers"]
-    logger.info(
-        f"  ✓ Graph: {kg_result['graph']['stats']['n_nodes']} nodes, "
-        f"{kg_result['graph']['stats']['n_edges']} edges | "
-        f"{len(seminal)} seminal papers"
-    )
+    # ── Seminal paper identification (from clustering output) ──────
+    # Top papers by citation count that appear across the most clusters.
+    # Replaces the removed Knowledge Graph / PageRank approach.
+    cluster_map = cluster_result["clusters"]
+    paper_cluster: dict[int, int] = {}
+    for cid_str, c in cluster_map.items():
+        if not c.get("is_noise"):
+            for pid in c.get("paper_ids", []):
+                paper_cluster[pid] = int(cid_str)
+    seminal = sorted(
+        [p for p in papers if p.get("citation_count", 0) > 0],
+        key=lambda p: p.get("citation_count", 0),
+        reverse=True,
+    )[:10]
+    logger.info(f"  ✓ {len(seminal)} seminal papers identified by citation count")
 
-    # ── Module 6: Gap Detection ────────────────────────────────────
+    # ── Module 5: Gap Detection ────────────────────────────────────
     _progress("Detecting research gaps …", 88)
-    logger.info("\n[6/6] Detecting research gaps …")
+    logger.info("\n[5/5] Detecting research gaps …")
     reduced_2d = np.array(cluster_result["reduced_2d"])
     labels_arr = np.array(cluster_result["labels"])
     gaps = detect_gaps(
@@ -131,10 +136,8 @@ def run_pipeline(
         "labels": cluster_result["labels"],
         # Temporal
         "temporal": temporal,
-        # Knowledge graph
-        "knowledge_graph": kg_result["graph"],
+        # Seminal papers (top-cited, used as gap detection anchors)
         "seminal_papers": seminal,
-        "knowledge_graph_html": kg_result["html_path"],
         # Gap detection
         "gaps": gaps,
     }

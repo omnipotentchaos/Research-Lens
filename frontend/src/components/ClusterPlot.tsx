@@ -1,8 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
-import { PipelineResult, Cluster, Paper } from '@/lib/types';
+import { useState, useMemo } from 'react';
+import { PipelineResult, Cluster, Paper, GeometricGap } from '@/lib/types';
 
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false });
 
@@ -16,14 +16,18 @@ interface Props { result: PipelineResult; clusters: Cluster[]; }
 
 export default function ClusterPlot({ result, clusters }: Props) {
   const [selected, setSelected] = useState<Paper | null>(null);
+  const [showHeatmap, setShowHeatmap] = useState(true);
+  const [showGaps, setShowGaps] = useState(true);
 
   const papers = result.papers || [];
   const points = result.reduced_2d || [];
   const labels = result.labels || [];
+  const geometricGaps: GeometricGap[] = (result.gaps?.geometric_gaps as GeometricGap[]) || [];
 
   const allNoise = clusters.length === 0;
   const noiseCount = labels.filter(l => l === -1).length;
 
+  // --- Build cluster scatter traces ---
   const clusterGroups: Record<number, { x: number[], y: number[], text: string[], papers: Paper[] }> = {};
   papers.forEach((paper, i) => {
     const cid = labels[i] ?? -1;
@@ -34,7 +38,7 @@ export default function ClusterPlot({ result, clusters }: Props) {
     clusterGroups[cid].papers.push(paper);
   });
 
-  const traces = Object.entries(clusterGroups).map(([cidStr, data]) => {
+  const scatterTraces = Object.entries(clusterGroups).map(([cidStr, data]) => {
     const cid = Number(cidStr);
     const cluster = clusters.find(c => c.cluster_id === cid);
     const isNoise = cid === -1;
@@ -51,6 +55,62 @@ export default function ClusterPlot({ result, clusters }: Props) {
     };
   });
 
+  // --- KDE density heatmap trace (shows where papers are dense / sparse) ---
+  const heatmapTrace = useMemo(() => {
+    if (!showHeatmap || points.length < 5) return null;
+    const xs = points.map(p => p[0]);
+    const ys = points.map(p => p[1]);
+    return {
+      type: 'histogram2dcontour' as const,
+      x: xs, y: ys,
+      ncontours: 20,
+      showscale: false,
+      contours: { coloring: 'fill' as const },
+      colorscale: [
+        [0, 'rgba(0,0,0,0)'],
+        [0.15, 'rgba(124,58,237,0.03)'],
+        [0.3, 'rgba(124,58,237,0.06)'],
+        [0.5, 'rgba(37,99,235,0.09)'],
+        [0.7, 'rgba(8,145,178,0.12)'],
+        [1, 'rgba(5,150,105,0.18)'],
+      ],
+      hoverinfo: 'skip' as const,
+      name: 'Paper density',
+      showlegend: false,
+    };
+  }, [points, showHeatmap]);
+
+  // --- Geometric gap markers (✕ at low-density voids between clusters) ---
+  const gapTrace = useMemo(() => {
+    if (!showGaps || geometricGaps.length === 0) return null;
+    return {
+      type: 'scatter' as const,
+      mode: 'markers+text' as const,
+      name: '⚠ Research Gaps',
+      x: geometricGaps.map(g => g.position_2d[0]),
+      y: geometricGaps.map(g => g.position_2d[1]),
+      text: geometricGaps.map((_, i) => `G${i + 1}`),
+      textposition: 'top center' as const,
+      textfont: { color: '#fbbf24', size: 10, family: 'Inter, system-ui' },
+      hovertemplate: geometricGaps.map(
+        g => `<b>Research Gap</b><br>${g.description}<extra></extra>`
+      ),
+      marker: {
+        size: 16,
+        symbol: 'x',
+        color: '#fbbf24',
+        opacity: 0.85,
+        line: { color: '#f59e0b', width: 2 },
+      },
+    };
+  }, [geometricGaps, showGaps]);
+
+  // Assemble all traces
+  const traces: any[] = [];
+  if (heatmapTrace) traces.push(heatmapTrace);
+  traces.push(...scatterTraces);
+  if (gapTrace) traces.push(gapTrace);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
@@ -60,9 +120,10 @@ export default function ClusterPlot({ result, clusters }: Props) {
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: '#c4b5fd', marginBottom: 3 }}>How to read this map</div>
           <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.6 }}>
-            Each dot = one paper. Papers with similar methods/topics are placed <strong style={{ color: '#94a3b8' }}>close together</strong> by UMAP (a dimensionality-reduction algorithm that preserves semantic distance).
-            Dots of the <strong style={{ color: '#94a3b8' }}>same colour</strong> belong to the same research cluster detected by HDBSCAN.
-            <strong style={{ color: '#94a3b8' }}> Click any dot</strong> to inspect that paper.
+            Each dot = one paper. Papers with similar methods/topics are placed <strong style={{ color: '#94a3b8' }}>close together</strong> by UMAP.
+            Dots of the <strong style={{ color: '#94a3b8' }}>same colour</strong> belong to the same cluster (HDBSCAN).
+            The <strong style={{ color: '#0891b2' }}>density heatmap</strong> shows where papers concentrate.
+            <strong style={{ color: '#fbbf24' }}> ✕ markers</strong> show <strong style={{ color: '#fbbf24' }}>research gaps</strong> — low-density voids between clusters where no papers exist.
           </div>
         </div>
       </div>
@@ -95,9 +156,37 @@ export default function ClusterPlot({ result, clusters }: Props) {
             style={{ width: '100%', height: '100%' }}
             onClick={(e) => {
               const pt = e.points?.[0];
-              if (pt?.customdata) setSelected(pt.customdata as Paper);
+              if (pt?.customdata) setSelected(pt.customdata as unknown as Paper);
             }}
           />
+
+          {/* Toggle buttons */}
+          <div style={{ position: 'absolute', top: 12, right: 12, display: 'flex', gap: 6 }}>
+            <button
+              onClick={() => setShowHeatmap(h => !h)}
+              style={{
+                fontSize: 11, padding: '4px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                border: '1px solid', transition: 'all 0.2s',
+                background: showHeatmap ? 'rgba(8,145,178,0.2)' : 'rgba(30,41,59,0.6)',
+                borderColor: showHeatmap ? 'rgba(8,145,178,0.4)' : '#1e293b',
+                color: showHeatmap ? '#67e8f9' : '#475569',
+              }}
+            >
+              {showHeatmap ? '🌡️ Density ON' : '🌡️ Density OFF'}
+            </button>
+            <button
+              onClick={() => setShowGaps(g => !g)}
+              style={{
+                fontSize: 11, padding: '4px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+                border: '1px solid', transition: 'all 0.2s',
+                background: showGaps ? 'rgba(251,191,36,0.15)' : 'rgba(30,41,59,0.6)',
+                borderColor: showGaps ? 'rgba(251,191,36,0.3)' : '#1e293b',
+                color: showGaps ? '#fbbf24' : '#475569',
+              }}
+            >
+              {showGaps ? `✕ Gaps ON (${geometricGaps.length})` : '✕ Gaps OFF'}
+            </button>
+          </div>
         </div>
 
         {/* Side panel */}
@@ -132,6 +221,30 @@ export default function ClusterPlot({ result, clusters }: Props) {
               </div>
             )}
           </div>
+
+          {/* Geometric gaps legend */}
+          {geometricGaps.length > 0 && (
+            <div className="glass" style={{ padding: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#fbbf24', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 10 }}>
+                ✕ KDE Void Gaps ({geometricGaps.length})
+              </div>
+              <div style={{ fontSize: 11, color: '#475569', marginBottom: 10, lineHeight: 1.6 }}>
+                Low-density regions between clusters where no papers exist — potential research opportunities.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {geometricGaps.slice(0, 5).map((g, i) => (
+                  <div key={i} style={{ fontSize: 11, color: '#94a3b8', display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                    <span style={{ color: '#fbbf24', fontWeight: 700, flexShrink: 0 }}>G{i + 1}</span>
+                    <span style={{ lineHeight: 1.5 }}>
+                      <span style={{ color: '#c4b5fd' }}>{g.label_a}</span>
+                      {' ↔ '}
+                      <span style={{ color: '#c4b5fd' }}>{g.label_b}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Paper detail on click */}
           {selected ? (

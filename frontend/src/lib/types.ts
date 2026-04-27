@@ -46,25 +46,26 @@ export interface Temporal {
 }
 
 export interface ResearchGap {
+  rank?: number;
   title: string;
   description: string;
-  priority: 'high' | 'medium' | 'low';
+  difficulty?: 'high' | 'medium' | 'low';
+  gap_type?: string;
+  why_it_matters?: string;
+  suggested_methods?: string;
+  // legacy fields — kept for backwards compatibility
+  priority?: 'high' | 'medium' | 'low';
   evidence?: string;
-  source?: string;
 }
 
-export interface GraphNode {
-  id: string;
-  node_type: string;
-  title?: string;
-  year?: number;
-  citation_count?: number;
-  cluster_id?: number;
-}
-
-export interface KnowledgeGraph {
-  nodes: GraphNode[];
-  edges: unknown[];
+export interface GeometricGap {
+  type: string;
+  cluster_a: number;
+  cluster_b: number;
+  label_a: string;
+  label_b: string;
+  description: string;
+  position_2d: [number, number];
 }
 
 export interface PipelineResult {
@@ -87,10 +88,10 @@ export interface PipelineResult {
   reduced_2d: [number, number][];
   labels: number[];
   temporal: Temporal;
-  knowledge_graph: KnowledgeGraph;
+  seminal_papers: Paper[];    // top-cited papers (no KG needed)
   gaps: {
     synthesized_gaps: ResearchGap[];
-    geometric_gaps: unknown[];
+    geometric_gaps: GeometricGap[];
     future_sentences: string[];
   };
 }

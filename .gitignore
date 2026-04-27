@@ -1,3 +1,6 @@
+# 💾 Job persistence files (auto-generated, can be large)
+data/jobs/
+
 # ── Python ──────────────────────────────────────────
 __pycache__/
 *.py[cod]

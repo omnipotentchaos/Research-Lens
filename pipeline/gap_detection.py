@@ -27,21 +27,11 @@ from typing import Optional
 
 from scipy.stats import gaussian_kde
 from sklearn.metrics.pairwise import euclidean_distances
-from groq import Groq
 from pipeline._llm import generate_json
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-
-_groq_client: Optional[Groq] = None
-
-
-def _get_groq() -> Groq:
-    global _groq_client
-    if _groq_client is None:
-        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _groq_client
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +228,7 @@ def synthesize_gaps_with_llm(
 ) -> list[dict]:
     """
     Feed all gathered evidence to the LLM and ask for ranked gap synthesis.
-    Prompt is intentionally short to stay within llama3.1-8b's 8k context.
+    Prompt is kept concise to ensure reliable JSON output from the model.
     """
     # Keep summaries short — 8B model has limited context
     cluster_lines = [
@@ -356,7 +346,6 @@ if __name__ == "__main__":
     from pipeline.extraction import extract_all_papers
     from pipeline.embedding import embed_papers
     from pipeline.clustering import run_clustering
-    from pipeline.knowledge_graph import build_and_export_graph
     import numpy as np
 
     topic = "Retrieval-Augmented Generation"
@@ -364,10 +353,16 @@ if __name__ == "__main__":
     papers = extract_all_papers(papers, use_rebel=False)
     embs = embed_papers(papers, topic=topic)
     cluster_result = run_clustering(papers, embs)
-    kg_result = build_and_export_graph(papers, cluster_result)
 
     reduced = np.array(cluster_result["reduced_2d"])
     labels = np.array(cluster_result["labels"])
+
+    # Seminal papers: top-10 by citation count
+    seminal = sorted(
+        [p for p in papers if p.get("citation_count", 0) > 0],
+        key=lambda p: p.get("citation_count", 0),
+        reverse=True,
+    )[:10]
 
     gaps = detect_gaps(
         topic=topic,
@@ -375,7 +370,7 @@ if __name__ == "__main__":
         reduced_2d=reduced,
         labels=labels,
         clusters=cluster_result["clusters"],
-        seminal_papers=kg_result["seminal_papers"],
+        seminal_papers=seminal,
     )
 
     print(f"\nGeometric gaps: {len(gaps['geometric_gaps'])}")
