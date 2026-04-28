@@ -31,14 +31,19 @@ import time
 import logging
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api.schemas import ResearchRequest, JobStatus
+from api.schemas import ResearchRequest, JobStatus, NoveltyRequest, NoveltyResponse, LitReviewResponse, AuthRequest, AuthResponse
+from pipeline._llm import generate_text, generate_json
+from pipeline.embedding import _embed_batch
+import numpy as np
+from api import auth
+from fastapi import Header
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 JOBS_DIR = Path("data/jobs")          # one JSON file per job
-JOB_TTL_HOURS = 1                     # delete jobs older than this
+JOB_TTL_HOURS = 168                   # delete jobs older than 1 week (for dashboard)
 CLEANUP_INTERVAL_SECONDS = 600        # run cleanup every 10 minutes
 
 # In-memory job store — seeded from disk on startup
@@ -348,7 +353,52 @@ def _serialise_result(result: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Auth Routes
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/register", response_model=AuthResponse)
+async def register(req: AuthRequest):
+    if auth.get_user_by_email(req.email):
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user_id = auth.create_user(req.email, req.password)
+    token = auth.create_session(user_id)
+    return {"token": token, "email": req.email}
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(req: AuthRequest):
+    user_id = auth.verify_user(req.email, req.password)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = auth.create_session(user_id)
+    return {"token": token, "email": req.email}
+
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization:
+        return None
+    token = authorization.replace("Bearer ", "")
+    return auth.get_user_from_token(token)
+
+@app.get("/api/user/jobs")
+async def list_user_jobs(user_id: int = Depends(get_current_user)):
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    user_jobs = [
+        {
+            "job_id": j["job_id"],
+            "topic": j.get("topic", "Unknown"),
+            "status": j["status"],
+            "created_at": j.get("created_at"),
+            "progress": j["progress"]
+        }
+        for j in _jobs.values()
+        if j.get("user_id") == user_id
+    ]
+    return sorted(user_jobs, key=lambda x: x.get("created_at", 0), reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Routes
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
@@ -361,7 +411,11 @@ async def health():
 
 
 @app.post("/api/research", response_model=JobStatus, status_code=202)
-async def start_research(request: ResearchRequest, background_tasks: BackgroundTasks):
+async def start_research(
+    request: ResearchRequest,
+    background_tasks: BackgroundTasks,
+    user_id: Optional[int] = Depends(get_current_user)
+):
     """
     Enqueue a pipeline job. Returns a job_id immediately.
     Poll GET /api/status/{job_id} for progress and results.
@@ -375,6 +429,7 @@ async def start_research(request: ResearchRequest, background_tasks: BackgroundT
         "result": None,
         "error": None,
         "topic": request.topic,
+        "user_id": user_id,
         "created_at": time.time(),   # used for TTL cleanup
     }
     _save_job(job_id)   # persist immediately so the job survives a crash even before it starts
@@ -419,12 +474,119 @@ async def list_jobs():
 
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
-async def delete_job(job_id: str):
+async def delete_job(job_id: str, user_id: int = Depends(get_current_user)):
     """Manually delete a job from memory and disk."""
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
+    if _jobs[job_id].get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to delete this job")
     _delete_job(job_id)
 
+
+# ---------------------------------------------------------------------------
+# Advanced Phase 2 Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/generate_lit_review", response_model=LitReviewResponse)
+async def generate_lit_review(job_id: str):
+    if job_id not in _jobs or _jobs[job_id]["status"] != "done":
+        raise HTTPException(status_code=404, detail="Job not found or not finished")
+    
+    result = _jobs[job_id]["result"]
+    clusters = result.get("clusters", {})
+    papers = result.get("papers", [])
+    
+    cluster_lines = []
+    for cid, c in clusters.items():
+        if c.get("is_noise"):
+            continue
+        p_titles = [p["title"] for p in papers if p.get("cluster_id") == int(cid)][:3]
+        cluster_lines.append(f"- Cluster '{c['label']}': {c['paper_count']} papers. Example works: {', '.join(p_titles)}")
+        
+    prompt = f"""You are a senior academic researcher writing a literature review.
+Topic: {result['topic']}
+
+Research clusters identified in this field:
+{chr(10).join(cluster_lines)}
+
+Write a professional, 3-paragraph academic literature review synthesizing this field.
+Use proper academic framing (e.g., "Early work established...", "Building on this...", "Recent trends focus on...").
+Return exactly 3 paragraphs of plain text. Do not use markdown headers."""
+
+    try:
+        review_text = generate_text(prompt)
+        return LitReviewResponse(literature_review=review_text.strip())
+    except Exception as e:
+        logger.error(f"Lit review generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate literature review")
+
+
+@app.post("/api/check_novelty", response_model=NoveltyResponse)
+async def check_novelty(req: NoveltyRequest):
+    if req.job_id not in _jobs or _jobs[req.job_id]["status"] != "done":
+        raise HTTPException(status_code=404, detail="Job not found or not finished")
+    
+    from pipeline.embedding import embed_papers
+    result = _jobs[req.job_id]["result"]
+    papers = result.get("papers", [])
+    
+    if not papers:
+        raise HTTPException(status_code=400, detail="No papers found in job")
+    
+    try:
+        # Load cached embeddings for the papers
+        embs = embed_papers(papers, topic=result["topic"], field="combined")
+        
+        # Embed the user's proposal
+        proposal_emb = _embed_batch([req.proposal])[0]
+        
+        # Compute cosine similarity
+        norm_embs = embs / np.linalg.norm(embs, axis=1, keepdims=True)
+        norm_prop = proposal_emb / np.linalg.norm(proposal_emb)
+        sims = np.dot(norm_embs, norm_prop)
+        
+        # Get top 3 closest
+        top_indices = np.argsort(sims)[::-1][:3]
+        top_score = float(sims[top_indices[0]])
+        
+        closest_papers = []
+        for idx in top_indices:
+            p = papers[idx]
+            closest_papers.append({
+                "title": p["title"],
+                "year": p.get("year"),
+                "similarity": float(sims[idx]),
+                "abstract": p.get("abstract", "")
+            })
+            
+        # Ask LLM to synthesize
+        p_text = "\n".join([f"- {p['title']} ({p['year']}): {p['abstract'][:300]}..." for p in closest_papers])
+        prompt = f"""You are a brutal but constructive PhD advisor.
+The student proposes the following research idea:
+"{req.proposal}"
+
+The 3 most similar existing papers in the corpus are:
+{p_text}
+
+Max similarity score is {top_score:.2f} (1.0 is identical).
+
+Determine if the student's idea is truly novel, or if they are reinventing the wheel.
+Return ONLY a JSON object with this exact format:
+{{"is_novel": true/false, "analysis": "1-2 short paragraphs explaining exactly where their idea overlaps with existing work, and what specific angle they should pivot to in order to remain novel."}}"""
+
+        llm_resp = generate_json(prompt)
+        
+        return NoveltyResponse(
+            is_novel=bool(llm_resp.get("is_novel", True)),
+            similarity_score=top_score,
+            closest_papers=closest_papers,
+            analysis=str(llm_resp.get("analysis", ""))
+        )
+    except Exception as e:
+        logger.error(f"Novelty check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------------------------------------------------------------------
 # WebSocket progress streaming

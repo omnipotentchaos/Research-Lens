@@ -9,7 +9,11 @@ import TimelineChart from '@/components/TimelineChart';
 import GapCards from '@/components/GapCards';
 import TopPapers from '@/components/TopPapers';
 import MethodologyTable from '@/components/MethodologyTable';
+import LitReview from '@/components/LitReview';
+import NoveltyChecker from '@/components/NoveltyChecker';
 import StatCard from '@/components/StatCard';
+import { useAuth } from '@/context/AuthContext';
+import Link from 'next/link';
 
 const STEPS = [
   { label: 'Retrieving papers',      match: 'retrieving' },
@@ -20,10 +24,12 @@ const STEPS = [
 ];
 
 const TABS = [
-  { id: 'clusters', label: '🗺 Cluster Map' },
-  { id: 'timeline', label: '📈 Timeline' },
-  { id: 'gaps',     label: '✨ Research Gaps' },
-  { id: 'graph',    label: '📄 Papers' },
+  { id: 'clusters',    label: '🗺 Cluster Map' },
+  { id: 'timeline',    label: '📈 Timeline' },
+  { id: 'gaps',        label: '✨ Research Gaps' },
+  { id: 'graph',       label: '📄 Papers' },
+  { id: 'methodology', label: '📊 Methodology' },
+  { id: 'tools',       label: '🛠️ AI Tools' },
 ] as const;
 
 type TabId = typeof TABS[number]['id'];
@@ -39,6 +45,7 @@ const S = {
 export default function ResultsPage() {
   const { jobId } = useParams<{ jobId: string }>();
   const router = useRouter();
+  const { user, token, logout, isLoading } = useAuth();
   const [job, setJob] = useState<JobStatus | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('clusters');
   // Track which tabs have been visited — show skeleton on first visit
@@ -134,12 +141,27 @@ export default function ResultsPage() {
       <header style={S.header}>
         <button id="back-btn" onClick={() => router.push('/')} style={{ color: '#64748b', background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, padding: 4, lineHeight: 1 }}>←</button>
         <div style={{ width: 1, height: 24, background: '#1e293b' }} />
-        <div>
+        <div style={{ flex: 1 }}>
           <div style={{ color: '#7c3aed', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Research Topic</div>
-          <div style={{ fontWeight: 700, color: '#f1f5f9', fontSize: 15 }}>{result.topic}</div>
+          <h1 style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9', margin: 0 }}>{result.topic}</h1>
         </div>
-        <div style={{ marginLeft: 'auto', color: '#475569', fontSize: 12 }}>
-          ⏱ {result.metadata.pipeline_time_seconds.toFixed(1)}s
+        <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+          {!isLoading && (
+            <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+              {user ? (
+                <>
+                  <Link href="/dashboard" style={{ color: '#94a3b8', fontSize: 13, textDecoration: 'none', fontWeight: 500 }}>Library</Link>
+                  <button onClick={logout} style={{ color: '#94a3b8', fontSize: 13, background: 'none', border: 'none', cursor: 'pointer', fontWeight: 500 }}>Logout</button>
+                </>
+              ) : (
+                <Link href="/auth" style={{ color: '#7c3aed', fontSize: 13, textDecoration: 'none', fontWeight: 600 }}>Login</Link>
+              )}
+            </div>
+          )}
+          <div style={{ width: 1, height: 24, background: '#1e293b' }} />
+          <div style={{ color: '#475569', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span>⏱</span> {result.metadata.pipeline_time_seconds?.toFixed(1)}s
+          </div>
         </div>
       </header>
 
@@ -189,10 +211,20 @@ export default function ResultsPage() {
           )}
           {activeTab === 'graph' && (
             mountedTabs.has('graph')
+              ? <TopPapers papers={result.papers} clusters={clusters} />
+              : <TabSkeleton />
+          )}
+          {activeTab === 'methodology' && (
+            mountedTabs.has('methodology')
+              ? <MethodologyTable papers={result.papers} />
+              : <TabSkeleton />
+          )}
+          {activeTab === 'tools' && (
+            mountedTabs.has('tools')
               ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 48 }}>
-                  <TopPapers papers={result.papers} clusters={clusters} />
-                  <MethodologyTable papers={result.papers} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+                  <LitReview jobId={jobId as string} />
+                  <NoveltyChecker jobId={jobId as string} />
                 </div>
               )
               : <TabSkeleton />

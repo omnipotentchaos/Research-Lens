@@ -19,7 +19,6 @@ const SOURCE_LABELS: Record<string, { label: string; color: string; bg: string }
 const MEDAL = ['🥇', '🥈', '🥉'];
 
 export default function TopPapers({ papers, clusters }: Props) {
-  const [filterCluster, setFilterCluster] = useState<number | 'all'>('all');
   const [expandedAbstracts, setExpandedAbstracts] = useState<Record<number, boolean>>({});
 
   const toggleAbstract = (id: number) => {
@@ -41,10 +40,7 @@ export default function TopPapers({ papers, clusters }: Props) {
     });
   }, [papers]);
 
-  const filtered = useMemo(() => {
-    if (filterCluster === 'all') return sorted;
-    return sorted.filter(p => Number(p.cluster_id) === Number(filterCluster));
-  }, [sorted, filterCluster]);
+  const filtered = sorted;
 
   // Find citation max for the influence bar
   const maxCitations = sorted[0]?.citation_count ?? 1;
@@ -58,50 +54,12 @@ export default function TopPapers({ papers, clusters }: Props) {
         <div>
           <div style={{ fontSize: 13, fontWeight: 700, color: '#fbbf24', marginBottom: 4 }}>Top Papers Spotlight</div>
           <div style={{ fontSize: 12, color: '#64748b', lineHeight: 1.7 }}>
-            The most influential papers in this topic, ranked by citation count.{' '}
-            <strong style={{ color: '#94a3b8' }}>OpenAlex papers have real citation data</strong>; arXiv-only papers are listed after.
-            Use this to identify foundational works before writing a literature review.
+            Papers ranked by citation count — identify foundational works at a glance.
           </div>
         </div>
       </div>
 
-      {/* Cluster filter chips */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        <button
-          onClick={() => setFilterCluster('all')}
-          style={{
-            padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 500,
-            border: '1px solid', cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s',
-            borderColor: filterCluster === 'all' ? '#f59e0b' : '#1e293b',
-            background: filterCluster === 'all' ? 'rgba(245,158,11,0.15)' : 'transparent',
-            color: filterCluster === 'all' ? '#fbbf24' : '#475569',
-          }}
-        >
-          All · {papers.length}
-        </button>
-        {clusters.map(c => {
-          const active = filterCluster === c.cluster_id;
-          const color = CLUSTER_COLORS[c.cluster_id % CLUSTER_COLORS.length];
-          return (
-            <button key={c.cluster_id} onClick={() => setFilterCluster(c.cluster_id)}
-              style={{
-                padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 500,
-                border: '1px solid', cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s',
-                borderColor: active ? color : '#1e293b',
-                background: active ? color + '22' : 'transparent',
-                color: active ? color : '#475569',
-              }}
-            >
-              {c.label} · {c.paper_count}
-            </button>
-          );
-        })}
-      </div>
 
-      {/* Count */}
-      <div style={{ color: '#334155', fontSize: 13 }}>
-        Showing <span style={{ color: '#f59e0b', fontWeight: 600 }}>{filtered.length}</span> of {papers.length} papers
-      </div>
 
       {/* Paper Cards */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -197,46 +155,7 @@ export default function TopPapers({ papers, clusters }: Props) {
                     )}
                   </div>
 
-                  {/* Citation influence bar */}
-                  {citations > 0 && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                      <span style={{ fontSize: 10, color: '#334155', width: 60, flexShrink: 0 }}>Influence</span>
-                      <div style={{ flex: 1, maxWidth: 200, height: 4, borderRadius: 4, background: 'rgba(15,22,41,0.8)', overflow: 'hidden' }}>
-                        <div style={{
-                          height: '100%', width: `${infPct}%`, borderRadius: 4,
-                          background: `linear-gradient(90deg, ${clusterColor}, ${clusterColor}aa)`,
-                          transition: 'width 0.6s ease',
-                        }} />
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Key contribution */}
-                  {paper.key_contribution && (
-                    <div style={{ marginBottom: 10 }}>
-                      <span style={{ fontSize: 10, fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Key Contribution · </span>
-                      <span style={{ fontSize: 12, color: '#94a3b8', lineHeight: 1.6 }}>{paper.key_contribution}</span>
-                    </div>
-                  )}
-
-                  {/* Method + Dataset chips */}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                    {paper.method && (
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 5, background: 'rgba(167,139,250,0.1)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.2)' }}>
-                        ⚙ {paper.method}
-                      </span>
-                    )}
-                    {paper.dataset && (
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 5, background: 'rgba(52,211,153,0.1)', color: '#34d399', border: '1px solid rgba(52,211,153,0.2)' }}>
-                        📊 {paper.dataset}
-                      </span>
-                    )}
-                    {paper.task && (
-                      <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 5, background: 'rgba(96,165,250,0.1)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)' }}>
-                        🎯 {paper.task}
-                      </span>
-                    )}
-                  </div>
 
                   {/* Links and Actions */}
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -290,6 +209,8 @@ export default function TopPapers({ papers, clusters }: Props) {
                       {paper.abstract}
                     </div>
                   )}
+
+
                 </div>
               </div>
             </div>

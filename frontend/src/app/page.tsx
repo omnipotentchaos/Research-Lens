@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { startResearch } from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import Link from 'next/link';
 
 const EXAMPLE_TOPICS = [
   'Retrieval-Augmented Generation in NLP',
@@ -23,6 +25,7 @@ const FEATURES = [
 
 export default function HomePage() {
   const router = useRouter();
+  const { user, token, logout, isLoading } = useAuth();
   const [topic, setTopic] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -33,10 +36,20 @@ export default function HomePage() {
     setLoading(true);
     setError('');
     try {
-      const job = await startResearch(topic.trim(), 50);
+      const job = await startResearch(topic.trim(), 50, 2018, true, token || undefined);
       router.push(`/results/${job.job_id}`);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to start pipeline';
+    } catch (err: any) {
+      const detail = err.response?.data?.detail;
+      let message = 'Failed to start pipeline';
+      if (typeof detail === 'string') {
+        message = detail;
+      } else if (Array.isArray(detail)) {
+        message = detail[0]?.msg || 'Validation error';
+      } else if (detail && typeof detail === 'object') {
+        message = JSON.stringify(detail);
+      } else if (err instanceof Error) {
+        message = err.message;
+      }
       setError(message);
       setLoading(false);
     }
@@ -44,6 +57,49 @@ export default function HomePage() {
 
   return (
     <main style={{ minHeight: '100vh', background: '#080b14', position: 'relative', overflow: 'hidden' }} className="bg-grid">
+      {/* Header / Nav */}
+      <nav style={{ 
+        position: 'absolute', top: 0, width: '100%', padding: '24px 40px', 
+        display: 'flex', justifyContent: 'flex-end', zIndex: 100 
+      }}>
+        {!isLoading && (
+          <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+            {user ? (
+              <>
+                <Link href="/dashboard" style={{ color: '#cbd5e1', fontSize: '14px', textDecoration: 'none', fontWeight: '500' }}>
+                  Dashboard
+                </Link>
+                <button 
+                  onClick={logout}
+                  style={{ 
+                    background: 'none', border: 'none', color: '#cbd5e1', 
+                    fontSize: '14px', cursor: 'pointer', fontWeight: '500' 
+                  }}
+                >
+                  Logout
+                </button>
+                <div style={{ 
+                  width: '32px', height: '32px', borderRadius: '50%', background: '#7c3aed',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '14px', fontWeight: '700', color: '#fff'
+                }}>
+                  {user.email[0].toUpperCase()}
+                </div>
+              </>
+            ) : (
+              <Link href="/auth">
+                <button style={{ 
+                  padding: '8px 20px', borderRadius: '8px', background: 'rgba(124,58,237,0.1)',
+                  color: '#a78bfa', border: '1px solid rgba(124,58,237,0.2)',
+                  fontSize: '14px', fontWeight: '600', cursor: 'pointer'
+                }}>
+                  Login
+                </button>
+              </Link>
+            )}
+          </div>
+        )}
+      </nav>
       {/* Ambient glow orbs */}
       <div style={{ position: 'absolute', top: -200, left: -200, width: 600, height: 600, borderRadius: '50%', background: 'radial-gradient(circle, rgba(124,58,237,0.12) 0%, transparent 70%)', pointerEvents: 'none' }} />
       <div style={{ position: 'absolute', bottom: -200, right: -100, width: 500, height: 500, borderRadius: '50%', background: 'radial-gradient(circle, rgba(37,99,235,0.08) 0%, transparent 70%)', pointerEvents: 'none' }} />

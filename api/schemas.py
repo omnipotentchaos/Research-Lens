@@ -21,6 +21,7 @@ class JobStatus(BaseModel):
     current_step: str
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    user_id: Optional[int] = None
     logs: list[str] = Field(default_factory=list)
 
 
@@ -52,3 +53,27 @@ class GapOut(BaseModel):
     suggested_methods: str
     difficulty: str
     gap_type: str
+
+
+class NoveltyRequest(BaseModel):
+    job_id: str
+    proposal: str = Field(..., min_length=10, max_length=2000)
+
+class NoveltyResponse(BaseModel):
+    is_novel: bool
+    similarity_score: float
+    closest_papers: list[dict]
+    analysis: str
+
+class LitReviewResponse(BaseModel):
+    literature_review: str
+
+class AuthRequest(BaseModel):
+    email: str = Field(..., example="user@example.com")
+    password: str = Field(..., min_length=6)
+
+class AuthResponse(BaseModel):
+    token: str
+    email: str
+
+
