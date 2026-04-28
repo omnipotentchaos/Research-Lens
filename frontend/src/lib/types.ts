@@ -104,4 +104,5 @@ export interface JobStatus {
   result?: PipelineResult;
   error?: string;
   topic?: string;
+  logs?: string[];
 }

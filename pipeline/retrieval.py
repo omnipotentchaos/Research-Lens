@@ -65,64 +65,66 @@ def _deduplicate(papers: list[dict]) -> list[dict]:
 # Query expansion
 # ---------------------------------------------------------------------------
 
-def _looks_like_paper_title(text: str) -> bool:
+def expand_query(topic: str, log_cb=None) -> tuple[list[str], bool]:
     """
-    Heuristic: detect if the user pasted a paper title rather than a topic.
-    Paper titles tend to be long, contain colons, and have Title Case proper nouns.
+    Returns (queries, is_title_mode).
+    Uses the LLM to automatically detect if the query is a specific paper title or a general topic,
+    and generates appropriate search queries.
     """
-    words = text.split()
-    if len(words) < 6:
-        return False
-
-    # Strong signals: contains a colon (very common in paper titles)
-    has_colon = ":" in text
-
-    # Count capitalised non-stopword words (Title Case pattern)
-    _stop = {"a", "an", "the", "in", "for", "of", "and", "with", "on", "to", "via", "using"}
-    capitalised = sum(1 for w in words if w[0].isupper() and w.lower() not in _stop)
-    cap_ratio = capitalised / len(words)
-
-    # Paper titles: long + (colon OR high Title Case ratio)
-    if len(words) >= 8 and (has_colon or cap_ratio > 0.6):
-        return True
-    return False
-
-
-def expand_query(topic: str) -> list[str]:
-    is_title = _looks_like_paper_title(topic)
-    if is_title:
-        logger.info(f"Detected paper title — switching to 'find related papers' mode")
+    # Hardcoded map for famous models to guarantee we find their foundational papers
+    # regardless of LLM hallucinations.
+    canonical_map = {
+        "gpt 3": "Language Models are Few-Shot Learners",
+        "gpt-3": "Language Models are Few-Shot Learners",
+        "resnet": "Deep Residual Learning for Image Recognition",
+        "yolo": "You Only Look Once: Unified, Real-Time Object Detection",
+        "transformer": "Attention Is All You Need",
+        "bert": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+        "vit": "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale",
+        "llama": "LLaMA: Open and Efficient Foundation Language Models",
+        "llama 2": "Llama 2: Open Foundation and Fine-Tuned Chat Models",
+        "llama 3": "The Llama 3 Herd of Models",
+        "dall e": "Zero-Shot Text-to-Image Generation",
+        "dall-e": "Zero-Shot Text-to-Image Generation",
+        "dalle": "Zero-Shot Text-to-Image Generation",
+        "dall e 2": "Hierarchical Text-Conditional Image Generation with CLIP Latents",
+        "dall-e 2": "Hierarchical Text-Conditional Image Generation with CLIP Latents",
+        "dalle 2": "Hierarchical Text-Conditional Image Generation with CLIP Latents"
+    }
+    
+    clean_topic = topic.lower().strip()
+    canonical_title = canonical_map.get(clean_topic)
 
     try:
-        if is_title:
-            # Paper title mode: ask LLM to extract the core research topic
-            prompt = (
-                f"The user pasted a paper title: \"{topic}\"\n\n"
-                f"Extract the core research topic and generate 3 short search queries "
-                f"that would find RELATED papers on the same topic.\n\n"
-                f"Rules:\n"
-                f"- Each query should be 3-6 words (a topic, not a title)\n"
-                f"- Focus on the paper's research area, not the paper itself\n"
-                f"- Return ONLY this JSON format:\n"
-                f'  {{"topic": "short core topic", "queries": ["query1", "query2", "query3"]}}'
-            )
-        else:
-            # Normal topic mode
-            prompt = (
-                f"Generate 2 alternative academic search queries for the topic: {topic}\n\n"
-                f"Rules:\n"
-                f"- Each query must be a plain search string (no JSON, no brackets)\n"
-                f"- Each query should use different keywords or synonyms\n"
-                f"- Return ONLY this exact JSON format, nothing else:\n"
-                f'{{"queries": ["first query", "second query"]}}'
-            )
+        prompt = (
+            f"The user entered the following search query: \"{topic}\"\n\n"
+            f"Task 1: Determine if this query looks like the title of a specific academic paper, "
+            f"or if it is a general research topic.\n"
+            f"Task 2: If it is a paper title, extract the core research topic and generate 3 short search queries "
+            f"(3-6 words each) that would find RELATED papers. If it is a general topic, generate 2 alternative "
+            f"academic search queries using different keywords or synonyms.\n\n"
+            f"Rules:\n"
+            f"- Return ONLY this exact JSON format, nothing else:\n"
+            f'{{\n'
+            f'  "is_paper_title": true/false,\n'
+            f'  "queries": ["query1", "query2", ...]\n'
+            f'}}'
+        )
 
         parsed = generate_json(prompt)
-        raw_queries = []
-        for v in parsed.values():
-            if isinstance(v, list):
-                raw_queries = v[:3] if is_title else v[:2]
-                break
+        is_title = bool(parsed.get("is_paper_title", False))
+        
+        if is_title:
+            logger.info(f"LLM detected paper title — switching to 'find related papers' mode")
+
+        raw_queries = parsed.get("queries", [])
+        if not isinstance(raw_queries, list):
+            raw_queries = []
+
+        if is_title:
+            raw_queries = raw_queries[:3]
+        else:
+            raw_queries = raw_queries[:2]
 
         # Validate: reject any query that looks like a JSON object/nested structure
         clean_queries = []
@@ -134,13 +136,35 @@ def expand_query(topic: str) -> list[str]:
             if len(q) > 5:
                 clean_queries.append(q)
 
+        if canonical_title:
+            is_title = True
+            logger.info(f"Hardcoded canonical title applied: {canonical_title}")
+            if log_cb: log_cb(f"Detected famous shorthand! Searching for foundational paper: '{canonical_title}'")
+            return [canonical_title, topic] + clean_queries, is_title
+
+        if canonical_title:
+            is_title = True
+            logger.info(f"Hardcoded canonical title applied: {canonical_title}")
+            if log_cb: log_cb(f"Detected famous shorthand! Searching for foundational paper: '{canonical_title}'")
+            return [canonical_title, topic] + clean_queries, is_title
+
         if clean_queries:
             logger.info(f"Expanded queries: {clean_queries}")
-            return [topic] + clean_queries
+            if log_cb:
+                if is_title:
+                    log_cb("Title Mode Active! Generating 'find related papers' queries...")
+                else:
+                    log_cb("Topic Mode Active! Generating alternative keyword queries...")
+                for q in clean_queries:
+                    log_cb(f"  → Generated query: {q}")
+            return [topic] + clean_queries, is_title
 
     except Exception as e:
         logger.warning(f"Query expansion failed: {e}. Using original topic only.")
-    return [topic]
+    
+    # Fallback heuristic if LLM fails
+    is_title_fallback = ":" in topic and len(topic.split()) >= 4
+    return [topic], is_title_fallback
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +363,20 @@ def _reconstruct_abstract(inverted_index: dict | None) -> str:
 # BM25 Re-ranking
 # ---------------------------------------------------------------------------
 
-def _bm25_rerank(papers: list[dict], topic: str, top_k: int = 50) -> list[dict]:
+def _bm25_rerank(
+    papers: list[dict],
+    topic: str,
+    top_k: int = 50,
+    alpha: float = 0.65,
+    beta: float = 0.35,
+) -> list[dict]:
     """
-    Hybrid re-ranking: BM25 relevance (0.65) + log-citation score (0.35).
+    Hybrid re-ranking: BM25 relevance (alpha) + log-citation score (beta).
 
-    Pure BM25 buries foundational papers because their abstracts use novel
-    vocabulary — secondary papers that analyse them score higher by repeating
-    the topic term many times. Log-citation rescues landmark papers.
+    - Topic mode (default):  alpha=0.65, beta=0.35  — relevance-primary
+    - Title mode:            alpha=0.30, beta=0.70  — citation-primary
+      (when the user pastes a paper title, the most influential paper in that
+       research area should always appear near the top regardless of word overlap)
 
     Log scale is used for citations because the distribution is heavily skewed
     (e.g. GPT-3: 45 000 citations vs a typical paper: 50 citations).
@@ -368,18 +399,29 @@ def _bm25_rerank(papers: list[dict], topic: str, top_k: int = 50) -> list[dict]:
     cite_norm = [s / cite_max for s in cite_log]           # → [0, 1]
 
     # ── Hybrid score ─────────────────────────────────────────────────────────
-    ALPHA = 0.65   # BM25 weight  (relevance)
-    BETA  = 0.35   # citation weight (influence / foundational importance)
-
     hybrid = [
-        ALPHA * bm + BETA * cn
+        alpha * bm + beta * cn
         for bm, cn in zip(bm25_norm, cite_norm)
     ]
 
     ranked = sorted(zip(hybrid, papers), key=lambda x: x[0], reverse=True)
     selected = [p for _, p in ranked[:top_k]]
+
+    # ── Influential paper guarantee ───────────────────────────────────────────
+    # The user specifically requested: "Whatever I search, it should tell me the top most influential paper."
+    # We unconditionally pin the paper with the absolute highest citation count to position 0.
+    if selected:
+        max_cited = max(selected, key=lambda p: p.get("citation_count", 0))
+        if selected[0] != max_cited and max_cited.get("citation_count", 0) > 0:
+            current_pos = selected.index(max_cited)
+            selected.insert(0, selected.pop(current_pos))
+            logger.info(
+                f"Pinned most influential paper to top: '{max_cited['title'][:60]}' "
+                f"({max_cited['citation_count']} citations)"
+            )
+
     logger.info(
-        f"Hybrid re-ranking (BM25×{ALPHA} + citation×{BETA}): "
+        f"Hybrid re-ranking (BM25×{alpha} + citation×{beta}): "
         f"{len(papers)} → {len(selected)} papers"
     )
     return selected
@@ -395,29 +437,58 @@ def retrieve_papers(
     min_year: int = 2018,
     min_citations: int = 2,
     use_cache: bool = True,
+    log_cb = None,
 ) -> list[dict]:
     """
     Main entry point. Returns deduplicated, hybrid-ranked papers from
-    Semantic Scholar + OpenAlex (arXiv excluded — indexed via S2).
+    Semantic Scholar + OpenAlex.
+
+    Automatically detects two modes:
+    - Topic mode  (default): user typed a general topic, e.g. 'Graph Neural Networks'
+    - Title mode:            user pasted a specific paper title, e.g.
+                             'Attention Is All You Need'
+
+    In title mode:
+      - min_year is relaxed to 2010 (foundational papers predate 2018)
+      - an extra citation-sorted S2 batch is fetched to pin influential papers
+      - BM25/citation weights shift to citation-primary (alpha=0.30, beta=0.70)
     """
     if use_cache:
         cached = _load_cache(topic)
         if cached:
             return cached
 
-    # Only expand queries when we actually need to fetch new papers.
-    # If the cache exists it was already returned above, so we only reach
-    # this point on a genuine cache miss — expand_query is worth it here.
-    queries = expand_query(topic)
-    logger.info(f"Using {len(queries)} search queries across 3 sources.")
+    # Expand queries + detect mode
+    if log_cb: log_cb(f"Expanding query via LLM intent detection...")
+    queries, is_title_mode = expand_query(topic, log_cb=log_cb)
+    logger.info(f"Mode: {'paper-title' if is_title_mode else 'topic'} | {len(queries)} search queries")
+
+    # In title mode, go back further — landmark papers predate 2018
+    effective_min_year = 2010 if is_title_mode else min_year
 
     all_papers: list[dict] = []
+
     for q in queries:
-        # arXiv removed — rate-limits aggressively and S2 already indexes arXiv papers
-        all_papers.extend(_fetch_semantic_scholar(q, max_results=50, min_year=min_year))
+        # Standard relevance-sorted fetch from both sources
+        all_papers.extend(
+            _fetch_semantic_scholar(q, max_results=50, min_year=effective_min_year, sort="Relevance")
+        )
         time.sleep(0.5)
-        all_papers.extend(_fetch_openalex(q, max_results=50, min_year=min_year))
+        all_papers.extend(
+            _fetch_openalex(q, max_results=50, min_year=effective_min_year)
+        )
         time.sleep(0.5)
+
+    # Extra citation-sorted S2 batch — always added for the primary query.
+    # This guarantees highly-cited foundational papers are captured even when
+    # their abstracts don't match query terms well (BM25 blind spot).
+    logger.info("Fetching citation-sorted S2 batch to capture influential papers …")
+    all_papers.extend(
+        _fetch_semantic_scholar(
+            queries[0], max_results=30, min_year=effective_min_year, sort="CitationCount"
+        )
+    )
+    time.sleep(0.5)
 
     logger.info(f"Total raw papers: {len(all_papers)}")
 
@@ -425,8 +496,6 @@ def retrieve_papers(
     logger.info(f"After dedup: {len(all_papers)}")
 
     # Quality filter — year-aware citation threshold
-    # Recent papers (last 2 years) haven't had time to accumulate citations,
-    # so we relax the threshold for them.
     from datetime import datetime
     current_year = datetime.now().year
     filtered = []
@@ -434,76 +503,78 @@ def retrieve_papers(
         if not p.get("abstract"):
             continue
         paper_year = p.get("year") or 0
-        # Relax citation filter for recent papers (last 2 years)
-        effective_min = 0 if paper_year >= current_year - 1 else min_citations
+        # Relax citation filter for: (a) recent papers, (b) all papers in title mode
+        # Title mode already fetches citation-sorted batch so quality is inherent
+        if is_title_mode:
+            effective_min = 0
+        else:
+            effective_min = 0 if paper_year >= current_year - 1 else min_citations
         if p["source"] != "arxiv" and p["citation_count"] < effective_min:
             continue
         filtered.append(p)
     logger.info(f"After quality filter: {len(filtered)}")
 
-    # Step 5: Keyword relevance guard
-    # Require the top-2 most SPECIFIC topic words to BOTH appear in title or abstract.
-    # Specificity heuristic:
-    #   - Proper nouns / model names (contain uppercase or digits in original query)
-    #     are the MOST specific, regardless of length. e.g. "XLNet" > "autoregressive"
-    #   - Among remaining words, longer = more specific
-    # Threshold is len >= 2 so short acronyms like "gpt", "rag", "llm" still qualify.
-    _STOPWORDS = {"in", "for", "the", "of", "a", "an", "with", "and", "on", "to",
-                  "using", "based", "from", "via", "its", "their", "this", "that"}
-    # Strip trailing punctuation (e.g. "XLNet:" → "XLNet")
-    import re as _re
-    raw_words = [_re.sub(r'[^\w]', '', w) for w in topic.split()]
-    raw_words = [w for w in raw_words if w and w.lower() not in _STOPWORDS and len(w) >= 2]
+    # Keyword relevance guard (topic mode only — title mode uses citation-primary ranking)
+    if not is_title_mode:
+        _STOPWORDS = {"in", "for", "the", "of", "a", "an", "with", "and", "on", "to",
+                      "using", "based", "from", "via", "its", "their", "this", "that"}
+        import re as _re
+        raw_words = [_re.sub(r'[^\w]', '', w) for w in topic.split()]
+        raw_words = [w for w in raw_words if w and w.lower() not in _STOPWORDS and len(w) >= 2]
 
-    def _specificity(word: str) -> int:
-        """Proper nouns / model names score higher than generic words."""
-        has_upper = any(c.isupper() for c in word[1:])   # uppercase beyond first char
-        has_digit = any(c.isdigit() for c in word)        # e.g. GPT-4, Llama3
-        is_all_caps = word == word.upper() and len(word) <= 6  # acronyms: RAG, LLM, NER
-        boost = 100 if (has_upper or has_digit or is_all_caps) else 0
-        return boost + len(word)
+        def _specificity(word: str) -> int:
+            has_upper = any(c.isupper() for c in word[1:])
+            has_digit = any(c.isdigit() for c in word)
+            is_all_caps = word == word.upper() and len(word) <= 6
+            boost = 100 if (has_upper or has_digit or is_all_caps) else 0
+            return boost + len(word)
 
-    topic_keywords = sorted(
-        [w.lower() for w in sorted(raw_words, key=_specificity, reverse=True)],
-    )
-    # Deduplicate while preserving specificity order
-    seen = set()
-    unique_keywords = []
-    for w in [w.lower() for w in sorted(raw_words, key=_specificity, reverse=True)]:
-        if w not in seen:
-            seen.add(w)
-            unique_keywords.append(w)
-    topic_keywords = unique_keywords
+        seen = set()
+        unique_keywords = []
+        for w in [w.lower() for w in sorted(raw_words, key=_specificity, reverse=True)]:
+            if w not in seen:
+                seen.add(w)
+                unique_keywords.append(w)
 
-    if topic_keywords:
-        # Progressive keyword guard: try AND, then OR, then skip
-        required = topic_keywords[:2] if len(topic_keywords) >= 2 else topic_keywords[:1]
-        logger.info(f"Keyword guard — anchors: {required}")
+        if unique_keywords:
+            required = unique_keywords[:2] if len(unique_keywords) >= 2 else unique_keywords[:1]
+            logger.info(f"Keyword guard — anchors: {required}")
 
-        def _kw_in_paper(p: dict, kw: str) -> bool:
-            return (kw in (p.get("abstract") or "").lower() or
-                    kw in (p.get("title") or "").lower())
+            def _kw_in_paper(p: dict, kw: str) -> bool:
+                return (kw in (p.get("abstract") or "").lower() or
+                        kw in (p.get("title") or "").lower())
 
-        # Tier 1: ALL required keywords (AND)
-        and_filtered = [p for p in filtered if all(_kw_in_paper(p, kw) for kw in required)]
+            and_filtered = [p for p in filtered if all(_kw_in_paper(p, kw) for kw in required)]
 
-        if len(and_filtered) >= max_papers // 2:
-            logger.info(f"Keyword guard (AND): {len(and_filtered)} papers (was {len(filtered)})")
-            filtered = and_filtered
-        elif len(required) > 1:
-            # Tier 2: ANY required keyword (OR) — keeps papers mentioning at least one anchor
-            or_filtered = [p for p in filtered if any(_kw_in_paper(p, kw) for kw in required)]
-
-            if len(or_filtered) >= max_papers // 2:
-                logger.info(f"Keyword guard (OR): {len(or_filtered)} papers (was {len(filtered)})")
-                filtered = or_filtered
+            if len(and_filtered) >= max_papers // 2:
+                logger.info(f"Keyword guard (AND): {len(and_filtered)} papers")
+                filtered = and_filtered
+            elif len(required) > 1:
+                or_filtered = [p for p in filtered if any(_kw_in_paper(p, kw) for kw in required)]
+                if len(or_filtered) >= max_papers // 2:
+                    logger.info(f"Keyword guard (OR): {len(or_filtered)} papers")
+                    filtered = or_filtered
+                else:
+                    logger.info(f"Keyword guard skipped (OR would leave only {len(or_filtered)})")
             else:
-                logger.info(f"Keyword guard skipped (OR would leave only {len(or_filtered)})")
-        else:
-            logger.info(f"Keyword guard skipped (would leave only {len(and_filtered)})")
+                logger.info(f"Keyword guard skipped (AND left only {len(and_filtered)})")
 
+    # Mode-aware ranking weights
+    alpha = 0.30 if is_title_mode else 0.65   # citation-primary for title, relevance-primary for topic
+    beta  = 0.70 if is_title_mode else 0.35
 
-    final = _bm25_rerank(filtered, topic, top_k=max_papers)
+    final = _bm25_rerank(filtered, topic, top_k=max_papers, alpha=alpha, beta=beta)
+    
+    # If in title mode, guarantee the exact paper is at index 0 (overriding the max_cited fallback)
+    if is_title_mode:
+        target_title = queries[0].lower()
+        for i, p in enumerate(final):
+            if fuzz.ratio(p["title"].lower(), target_title) > 90:
+                if i != 0:
+                    final.insert(0, final.pop(i))
+                    logger.info(f"Pinned exact title match to top: {p['title']}")
+                break
+
     for i, p in enumerate(final):
         p["id"] = i
 

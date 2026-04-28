@@ -21,6 +21,7 @@ class JobStatus(BaseModel):
     current_step: str
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
+    logs: list[str] = Field(default_factory=list)
 
 
 class PaperOut(BaseModel):

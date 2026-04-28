@@ -50,11 +50,21 @@ def _get_rebel():
 def _get_spacy():
     global _spacy_nlp
     if _spacy_nlp is None:
+        use_trf = os.getenv("SPACY_USE_TRF", "false").lower() == "true"
+        model_name = "en_core_web_trf" if use_trf else "en_core_web_sm"
+        fallback_name = "en_core_web_sm" if use_trf else "en_core_web_trf"
+        
         try:
-            _spacy_nlp = spacy.load("en_core_web_trf")
-        except OSError:
-            logger.warning("en_core_web_trf not found, falling back to en_core_web_sm")
-            _spacy_nlp = spacy.load("en_core_web_sm")
+            if use_trf:
+                logger.info(f"Attempting to load transformer model {model_name}...")
+            _spacy_nlp = spacy.load(model_name)
+        except (OSError, MemoryError, Exception) as e:
+            logger.warning(f"Failed to load {model_name} ({type(e).__name__}: {e}), falling back to {fallback_name}")
+            try:
+                _spacy_nlp = spacy.load(fallback_name)
+            except OSError:
+                logger.error(f"Could not load fallback model {fallback_name}. Please install it using: python -m spacy download {fallback_name}")
+                raise
     return _spacy_nlp
 
 
@@ -66,8 +76,8 @@ _BATCH_PROMPT = """\
 You are a scientific paper analyst. Extract structured information from the following {n} papers.
 
 Return ONLY a valid JSON object with a single key "results" containing an array of exactly {n} objects.
-Each object must have exactly these keys:
-  method, dataset, task, metrics, metric_values, key_contribution, limitations, future_work
+Each object must have the "id" field matching the paper's ID, plus exactly these keys:
+  id, method, dataset, task, metrics, metric_values, key_contribution, limitations, future_work
 
 Papers:
 {papers_text}
@@ -91,18 +101,33 @@ def _extract_batch_llm(papers: list[dict]) -> list[dict]:
 
         # LLM may return {"results": [...]} or a bare list [...] 
         if isinstance(parsed, dict):
-            results = parsed.get("results", [])
+            items = parsed.get("results", [])
         elif isinstance(parsed, list):
-            results = parsed
+            items = parsed
         else:
-            results = []
+            items = []
 
-        # Ensure every item is a dict (LLM sometimes returns strings in the list)
-        results = [r if isinstance(r, dict) else _EMPTY_FIELDS.copy() for r in results]
+        result_map = {}
+        for item in items:
+            if isinstance(item, dict) and "id" in item:
+                try:
+                    pid = int(item["id"])
+                    result_map[pid] = item
+                except ValueError:
+                    pass
 
-        while len(results) < len(papers):
-            results.append(_EMPTY_FIELDS.copy())
-        return results[:len(papers)]
+        # Ensure every item maps to its correct paper ID (1-indexed)
+        clean_results = []
+        for i in range(1, len(papers) + 1):
+            if i in result_map:
+                res = result_map[i].copy()
+                res.pop("id", None)  # Remove the batch-local 'id' so it doesn't overwrite the global paper id
+                clean_results.append({**_EMPTY_FIELDS, **res})
+            else:
+                logger.warning(f"Batch LLM missed paper id {i}")
+                clean_results.append(_EMPTY_FIELDS.copy())
+
+        return clean_results
     except Exception as e:
         logger.warning(f"Batch LLM extraction failed: {e}")
         return [_EMPTY_FIELDS.copy() for _ in papers]

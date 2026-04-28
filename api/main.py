@@ -189,6 +189,11 @@ app.mount("/static", StaticFiles(directory="data"), name="static")
 
 def _update_job(job_id: str, **kwargs) -> None:
     """Update job fields in memory, persist to disk, and push to WebSocket subscribers."""
+    new_log = kwargs.pop("new_log", None)
+    if new_log:
+        if "logs" not in _jobs[job_id]:
+            _jobs[job_id]["logs"] = []
+        _jobs[job_id]["logs"].append(new_log)
     _jobs[job_id].update(kwargs)
     _save_job(job_id)
     # Push progress event to all WebSocket subscribers for this job
@@ -196,7 +201,10 @@ def _update_job(job_id: str, **kwargs) -> None:
         "status": _jobs[job_id].get("status"),
         "progress": _jobs[job_id].get("progress"),
         "current_step": _jobs[job_id].get("current_step"),
+        "logs": _jobs[job_id].get("logs", [])
     }
+    if new_log:
+        event["new_log"] = new_log
     for q in _ws_queues.get(job_id, []):
         try:
             q.put_nowait(event)
@@ -211,24 +219,91 @@ def _update_job(job_id: str, **kwargs) -> None:
 async def _run_pipeline_job(job_id: str, request: ResearchRequest) -> None:
     """Async wrapper that runs the blocking pipeline in a thread pool."""
     import concurrent.futures
+    import threading
     from pipeline.orchestrator import run_pipeline
 
     _update_job(job_id, status="running", progress=5, current_step="Starting pipeline …")
 
     loop = asyncio.get_event_loop()
 
-    def _sync_run():
-        def _cb(step: str, pct: int):
-            _update_job(job_id, current_step=step, progress=pct)
+    class JobLogHandler(logging.Handler):
+        def __init__(self, cb, tid):
+            super().__init__()
+            self.cb = cb
+            self.tid = tid
+            
+        def emit(self, record):
+            if threading.get_ident() == self.tid:
+                try:
+                    self.cb(None, None, self.format(record))
+                except Exception:
+                    pass
 
-        return run_pipeline(
-            topic=request.topic,
-            max_papers=request.max_papers,
-            min_year=request.min_year,
-            use_rebel=request.use_rebel,
-            use_cache=request.use_cache,
-            on_progress=_cb,
-        )
+    def _sync_run():
+        def _cb(step: str, pct: int, log_msg: str = None):
+            def _threadsafe_update():
+                update_data = {}
+                if step is not None: update_data["current_step"] = step
+                if pct is not None: update_data["progress"] = pct
+                if log_msg is not None: update_data["new_log"] = log_msg
+                if update_data:
+                    _update_job(job_id, **update_data)
+            
+            # Since we are inside a background thread, pushing to asyncio queue
+            # must be scheduled on the event loop to ensure it sends via WebSockets
+            if hasattr(loop, "_thread_id") and threading.get_ident() == loop._thread_id:
+                _threadsafe_update()
+            else:
+                loop.call_soon_threadsafe(_threadsafe_update)
+
+        # 1. Capture Python pipeline logging (logger.info, logger.error)
+        class PipelineHandler(logging.Handler):
+            def emit(self, record):
+                if record.name.startswith("pipeline"):
+                    try:
+                        _cb(None, None, self.format(record))
+                    except Exception:
+                        pass
+                        
+        handler = PipelineHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        # Using a specific logger or the root logger
+        logging.getLogger().addHandler(handler)
+
+        # 2. Safely capture stdout/stderr (print statements and underlying libraries)
+        import sys
+        class StdStreamHook:
+            def __init__(self, original):
+                self.original = original
+            def write(self, s):
+                self.original.write(s)
+                # Ignore empty strings and carriage returns (used by progress bars like tqdm)
+                # But allow regular printing!
+                clean_s = s.replace("\r", "").strip()
+                if clean_s:
+                    try: _cb(None, None, clean_s)
+                    except Exception: pass
+            def flush(self):
+                self.original.flush()
+                
+        old_out = sys.stdout
+        old_err = sys.stderr
+        sys.stdout = StdStreamHook(old_out)
+        sys.stderr = StdStreamHook(old_err)
+
+        try:
+            return run_pipeline(
+                topic=request.topic,
+                max_papers=request.max_papers,
+                min_year=request.min_year,
+                use_rebel=request.use_rebel,
+                use_cache=request.use_cache,
+                on_progress=_cb,
+            )
+        finally:
+            logging.getLogger().removeHandler(handler)
+            sys.stdout = old_out
+            sys.stderr = old_err
 
     try:
         _update_job(job_id, progress=10, current_step="Retrieving papers …")
@@ -379,6 +454,7 @@ async def ws_progress(websocket: WebSocket, job_id: str):
                 "status": job.get("status"),
                 "progress": job.get("progress"),
                 "current_step": job.get("current_step"),
+                "logs": job.get("logs", []),
             })
             # If already done, send result and close
             if job.get("status") in ("done", "error"):

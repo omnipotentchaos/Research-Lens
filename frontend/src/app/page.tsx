@@ -24,7 +24,6 @@ const FEATURES = [
 export default function HomePage() {
   const router = useRouter();
   const [topic, setTopic] = useState('');
-  const [maxPapers, setMaxPapers] = useState(50);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -34,7 +33,7 @@ export default function HomePage() {
     setLoading(true);
     setError('');
     try {
-      const job = await startResearch(topic.trim(), maxPapers);
+      const job = await startResearch(topic.trim(), 50);
       router.push(`/results/${job.job_id}`);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to start pipeline';
@@ -94,18 +93,10 @@ export default function HomePage() {
               }}
             >
               {loading ? <>
-                <span style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                <span className="animate-spin" style={{ display: 'inline-block', width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%' }} />
                 Starting…
               </> : <>Analyse →</>}
             </button>
-          </div>
-
-          {/* Slider */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '0 4px' }}>
-            <span style={{ color: '#475569', fontSize: 13, whiteSpace: 'nowrap' }}>Papers: {maxPapers}</span>
-            <input type="range" min={10} max={100} step={10} value={maxPapers} onChange={e => setMaxPapers(Number(e.target.value))}
-              style={{ flex: 1, accentColor: '#7c3aed' }} />
-            <span style={{ color: '#475569', fontSize: 13 }}>100</span>
           </div>
 
           {error && <p style={{ color: '#f87171', fontSize: 13, marginTop: 10, textAlign: 'center' }}>{error}</p>}
@@ -140,9 +131,6 @@ export default function HomePage() {
 
       </div>
 
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
     </main>
   );
 }

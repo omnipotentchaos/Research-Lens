@@ -43,17 +43,23 @@ def run_pipeline(
     Returns:
         Unified JSON-serialisable dict with all pipeline outputs.
     """
-    def _progress(step: str, pct: int):
+    def _progress(step: str, pct: int, log_msg: str = None):
         if on_progress:
-            on_progress(step, pct)
+            on_progress(step, pct, log_msg)
+
+    def _log(msg: str):
+        if on_progress:
+            on_progress(None, None, msg)
 
     t0 = time.time()
     logger.info(f"\n{'='*60}\nResearchLens Pipeline\nTopic: {topic}\n{'='*60}")
 
     # ── Module 1: Retrieval ────────────────────────────────────────
     _progress("Retrieving papers …", 5)
+    _log(f"Starting semantic retrieval for: {topic}")
     logger.info("\n[1/5] Retrieving papers …")
-    papers = retrieve_papers(topic, max_papers=max_papers, min_year=min_year, use_cache=use_cache)
+    papers = retrieve_papers(topic, max_papers=max_papers, min_year=min_year, use_cache=use_cache, log_cb=_log)
+    _log(f"Kept {len(papers)} papers after BM25 re-ranking")
     logger.info(f"  ✓ {len(papers)} papers retrieved")
 
     if not papers:
@@ -61,14 +67,18 @@ def run_pipeline(
 
     # ── Module 2: Extraction ───────────────────────────────────────
     _progress("Extracting information …", 18)
+    _log("Initializing NLP extraction pipeline ...")
     logger.info("\n[2/5] Extracting information …")
     papers = extract_all_papers(papers, use_rebel=use_rebel)
+    _log("Finished concept/keyword extraction")
     logger.info(f"  ✓ Extraction complete ({len(papers)} papers)")
 
     # ── Module 3: Embeddings + Clustering ─────────────────────────
     _progress("Embedding + Clustering …", 40)
+    _log("Generating semantic embeddings via SPECTER2 ...")
     logger.info("\n[3/5] Embedding + Clustering …")
     embeddings = embed_papers(papers, topic=topic, field="combined")
+    _log("Running HDBSCAN spatial clustering ...")
     cluster_result = run_clustering(papers, embeddings)
     logger.info(
         f"  ✓ {cluster_result['clustering_metrics']['n_clusters']} clusters | "
@@ -77,6 +87,7 @@ def run_pipeline(
 
     # ── Module 4: Temporal Analysis ───────────────────────────────
     _progress("Temporal analysis …", 60)
+    _log("Analyzing historical trajectory & semantic shifts ...")
     logger.info("\n[4/5] Temporal analysis …")
     temporal = analyze_temporal(papers, embeddings)
     logger.info(f"  ✓ {len(temporal['timeline'])} years analysed")
@@ -99,6 +110,7 @@ def run_pipeline(
 
     # ── Module 5: Gap Detection ────────────────────────────────────
     _progress("Detecting research gaps …", 88)
+    _log("Synthesizing research gaps via LLM analysis ...")
     logger.info("\n[5/5] Detecting research gaps …")
     reduced_2d = np.array(cluster_result["reduced_2d"])
     labels_arr = np.array(cluster_result["labels"])
@@ -122,7 +134,7 @@ def run_pipeline(
             "paper_count": len(papers),
             "year_range": [
                 min(p["year"] for p in papers if p.get("year")),
-                max(p["year"] for p in papers if p.get("year")),
+                2026,
             ],
             "cluster_count": cluster_result["clustering_metrics"]["n_clusters"],
             "seminal_paper_count": len(seminal),

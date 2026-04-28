@@ -65,7 +65,11 @@ export default function ResultsPage() {
       ws = new WebSocket(getWsProgressUrl(jobId as string));
       ws.onmessage = (evt) => {
         const event = JSON.parse(evt.data);
-        setJob(prev => prev ? { ...prev, ...event } : prev);
+        setJob(prev => {
+          if (!prev) return prev;
+          const nextLogs = event.new_log ? [...(prev.logs || []), event.new_log] : (prev.logs || []);
+          return { ...prev, ...event, logs: nextLogs };
+        });
         if (event.status === 'done' || event.status === 'error') {
           // Fetch full result via REST (WS only sends progress, not full result)
           pollStatus(jobId as string).then(status => {
@@ -107,7 +111,7 @@ export default function ResultsPage() {
 
   if (!job) return <CenteredSpinner message="Connecting…" />;
   if (job.status === 'error') return <ErrorScreen error={job.error ?? 'Unknown error'} onBack={() => router.push('/')} />;
-  if (job.status !== 'done') return <PipelineProgress job={job} />;
+  if (job.status !== 'done' || !job.result) return <PipelineProgress job={job} />;
 
   const result = job.result as PipelineResult;
   const clusters: Cluster[] = Object.values(result.clusters || {}).filter(c => !c.is_noise);
@@ -240,50 +244,86 @@ function PipelineProgress({ job }: { job: JobStatus }) {
   const activeIdx = idx < 0 ? 0 : idx;
 
   return (
-    <div style={{ minHeight: '100vh', background: '#080b14', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <div className="glass" style={{ padding: 40, width: '100%', maxWidth: 500 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 28 }}>
-          <div style={{ width: 36, height: 36, border: '3px solid rgba(124,58,237,0.2)', borderTopColor: '#7c3aed', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+    <div className="bg-grid" style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, position: 'relative', overflow: 'hidden' }}>
+      {/* Ambient glow */}
+      <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 600, height: 600, borderRadius: '50%', background: 'radial-gradient(circle, rgba(124,58,237,0.15) 0%, transparent 60%)', filter: 'blur(40px)', pointerEvents: 'none', zIndex: 0 }} />
+      
+      <div className="glass animate-fadeUp" style={{ padding: 40, width: '100%', maxWidth: 600, position: 'relative', zIndex: 1, boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginBottom: 32 }}>
+          <div style={{ position: 'relative', width: 44, height: 44 }}>
+            <div style={{ position: 'absolute', inset: 0, border: '3px solid rgba(124,58,237,0.2)', borderTopColor: '#7c3aed', borderRadius: '50%', animation: 'spin 1s cubic-bezier(0.55, 0.085, 0.68, 0.53) infinite' }} />
+            <div style={{ position: 'absolute', inset: 6, border: '2px solid rgba(56,189,248,0.2)', borderBottomColor: '#38bdf8', borderRadius: '50%', animation: 'spin 1.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) infinite reverse' }} />
+          </div>
           <div>
-            <div style={{ fontWeight: 700, color: '#f1f5f9', fontSize: 15 }}>Analysing: <span style={{ color: '#a78bfa' }}>{job.topic}</span></div>
-            <div style={{ color: '#64748b', fontSize: 13, marginTop: 3 }}>{job.current_step}</div>
+            <div style={{ fontWeight: 700, color: '#f8fafc', fontSize: 18, letterSpacing: '-0.01em' }}>Analysing: <span className="gradient-text">{job.topic}</span></div>
+            <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#38bdf8', animation: 'pulse 2s infinite' }} /> 
+              {job.current_step}
+            </div>
           </div>
         </div>
 
         {/* Progress bar */}
-        <div style={{ height: 5, borderRadius: 999, background: '#1e293b', marginBottom: 32, overflow: 'hidden' }}>
-          <div style={{ height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, #7c3aed, #2563eb)', width: `${job.progress || 5}%`, transition: 'width 1s ease' }} />
+        <div style={{ height: 6, borderRadius: 999, background: 'rgba(30,41,59,0.8)', marginBottom: 36, overflow: 'hidden', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.5)' }}>
+          <div style={{ height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, #7c3aed, #3b82f6, #34d399)', width: `${job.progress || 5}%`, transition: 'width 1s cubic-bezier(0.4, 0, 0.2, 1)', position: 'relative' }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)', animation: 'shimmer 2s infinite' }} />
+          </div>
         </div>
 
         {/* Step list */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 32 }}>
           {STEPS.map((s, i) => {
             const done = i < activeIdx;
             const active = i === activeIdx;
             return (
-              <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <div style={{
-                  width: 30, height: 30, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, flexShrink: 0, border: '1.5px solid', transition: 'all 0.4s',
-                  borderColor: done ? '#10b981' : active ? '#7c3aed' : '#1e293b',
-                  background: done ? 'rgba(16,185,129,0.15)' : active ? 'rgba(124,58,237,0.2)' : 'rgba(15,22,41,0.6)',
-                  color: done ? '#10b981' : active ? '#a78bfa' : '#334155',
-                  boxShadow: active ? '0 0 12px rgba(124,58,237,0.4)' : 'none',
-                }}>
+              <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderRadius: 12, background: done ? 'rgba(16,185,129,0.05)' : active ? 'rgba(124,58,237,0.1)' : 'rgba(15,22,41,0.4)', border: '1px solid', borderColor: done ? 'rgba(16,185,129,0.2)' : active ? 'rgba(124,58,237,0.3)' : 'rgba(30,41,59,0.8)', transition: 'all 0.3s ease' }}>
+                <div style={{ width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0, border: '1.5px solid', transition: 'all 0.4s', borderColor: done ? '#10b981' : active ? '#7c3aed' : '#334155', background: done ? '#10b981' : active ? 'rgba(124,58,237,0.2)' : 'transparent', color: done ? '#0f172a' : active ? '#c4b5fd' : '#475569', boxShadow: active ? '0 0 12px rgba(124,58,237,0.4)' : 'none' }}>
                   {done ? '✓' : i + 1}
                 </div>
-                <span style={{ fontSize: 14, fontWeight: active ? 600 : 400, transition: 'color 0.4s', color: done ? '#10b981' : active ? '#a78bfa' : '#334155' }}>
+                <span style={{ fontSize: 13, fontWeight: active || done ? 500 : 400, color: done ? '#34d399' : active ? '#e2e8f0' : '#64748b' }}>
                   {s.label}
                 </span>
-                {active && <div style={{ marginLeft: 'auto', width: 6, height: 6, borderRadius: '50%', background: '#7c3aed', animation: 'pulse 1.2s ease-in-out infinite' }} />}
+                {active && <div style={{ marginLeft: 'auto', width: 6, height: 6, borderRadius: '50%', background: '#a78bfa', animation: 'pulse 1s ease-in-out infinite', boxShadow: '0 0 8px #a78bfa' }} />}
               </div>
             );
           })}
         </div>
+        
+        {/* Live Logs Terminal */}
+        <div style={{ background: '#020617', border: '1px solid rgba(51,65,85,0.5)', borderRadius: 12, overflow: 'hidden', boxShadow: '0 10px 30px -10px rgba(0,0,0,0.5)' }}>
+          {/* Terminal Header */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '12px 16px', background: '#0f172a', borderBottom: '1px solid rgba(51,65,85,0.5)' }}>
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} />
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#eab308' }} />
+            <div style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
+            <div style={{ marginLeft: 8, color: '#64748b', fontSize: 11, fontWeight: 600, letterSpacing: '0.05em', fontFamily: 'monospace' }}>pipeline.log</div>
+          </div>
+          {/* Terminal Output */}
+          <div style={{ height: 200, padding: '16px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8, fontFamily: '"JetBrains Mono", "Fira Code", monospace', fontSize: 12, color: '#94a3b8', scrollBehavior: 'smooth' }}>
+            {job.logs?.map((log, i) => (
+              <div key={i} style={{ display: 'flex', gap: 10, animation: 'fadeUp 0.3s ease-out' }}>
+                <span style={{ color: '#38bdf8', opacity: 0.8 }}>❯</span>
+                <span style={{ color: log.includes('✓') || log.includes('Kept') ? '#34d399' : log.includes('LLM') || log.includes('Generating') || log.includes('Title Mode') || log.includes('Topic Mode') ? '#c084fc' : '#e2e8f0', lineHeight: 1.5 }}>
+                  {log}
+                </span>
+              </div>
+            ))}
+            {(!job.logs || job.logs.length === 0) && <div style={{ opacity: 0.5, fontStyle: 'italic', display: 'flex', gap: 10 }}><span style={{ color: '#38bdf8' }}>❯</span><span>Awaiting system initialization...</span></div>}
+            {/* Blinking cursor */}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <span style={{ color: '#38bdf8', opacity: 0.8 }}>❯</span>
+              <span style={{ width: 8, height: 15, background: '#94a3b8', animation: 'blink 1s step-end infinite', marginTop: 2 }} />
+            </div>
+            {/* Empty element to scroll to bottom */}
+            <div ref={(el) => { el?.scrollIntoView({ behavior: 'smooth' }) }} />
+          </div>
+        </div>
       </div>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.4; transform:scale(0.7); } }
-        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        @keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:0.4; transform:scale(0.8); } }
+        @keyframes shimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
       `}</style>
     </div>
   );
