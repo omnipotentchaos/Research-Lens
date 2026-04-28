@@ -8,6 +8,7 @@ import ClusterPlot from '@/components/ClusterPlot';
 import TimelineChart from '@/components/TimelineChart';
 import GapCards from '@/components/GapCards';
 import TopPapers from '@/components/TopPapers';
+import MethodologyTable from '@/components/MethodologyTable';
 import StatCard from '@/components/StatCard';
 
 const STEPS = [
@@ -188,7 +189,12 @@ export default function ResultsPage() {
           )}
           {activeTab === 'graph' && (
             mountedTabs.has('graph')
-              ? <TopPapers papers={result.papers} clusters={clusters} />
+              ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 48 }}>
+                  <TopPapers papers={result.papers} clusters={clusters} />
+                  <MethodologyTable papers={result.papers} />
+                </div>
+              )
               : <TabSkeleton />
           )}
         </div>

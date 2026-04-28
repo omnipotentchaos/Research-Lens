@@ -20,6 +20,11 @@ const MEDAL = ['🥇', '🥈', '🥉'];
 
 export default function TopPapers({ papers, clusters }: Props) {
   const [filterCluster, setFilterCluster] = useState<number | 'all'>('all');
+  const [expandedAbstracts, setExpandedAbstracts] = useState<Record<number, boolean>>({});
+
+  const toggleAbstract = (id: number) => {
+    setExpandedAbstracts(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   const clusterMap = useMemo(
     () => Object.fromEntries(clusters.map(c => [c.cluster_id, c])),
@@ -233,8 +238,8 @@ export default function TopPapers({ papers, clusters }: Props) {
                     )}
                   </div>
 
-                  {/* Links */}
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  {/* Links and Actions */}
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
                     {pdfUrl ? (
                       <a href={pdfUrl} target="_blank" rel="noopener noreferrer" style={{
                         display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11,
@@ -259,7 +264,32 @@ export default function TopPapers({ papers, clusters }: Props) {
                         🔒 Paywalled — no open access PDF
                       </span>
                     )}
+                    
+                    {/* Expand Abstract Button */}
+                    {paper.abstract && (
+                      <button
+                        onClick={() => toggleAbstract(paper.id ?? i)}
+                        style={{
+                          background: 'none', border: 'none', color: '#64748b', fontSize: 11,
+                          cursor: 'pointer', padding: '4px 8px', display: 'flex', alignItems: 'center', gap: 4,
+                        }}
+                      >
+                        {expandedAbstracts[paper.id ?? i] ? 'Hide Abstract ▲' : 'Read Abstract ▼'}
+                      </button>
+                    )}
                   </div>
+                  
+                  {/* Expanded Abstract Section */}
+                  {expandedAbstracts[paper.id ?? i] && paper.abstract && (
+                    <div style={{
+                      marginTop: 14, padding: '12px 14px', borderRadius: 8,
+                      background: 'rgba(15,22,41,0.5)', border: '1px solid #1e293b',
+                      fontSize: 12, color: '#94a3b8', lineHeight: 1.6,
+                    }}>
+                      <div style={{ fontWeight: 600, color: '#e2e8f0', marginBottom: 6 }}>Abstract</div>
+                      {paper.abstract}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class ResearchRequest(BaseModel):
     topic: str = Field(..., min_length=3, max_length=300, example="graph neural networks")
     max_papers: int = Field(default=40, ge=5, le=100)
-    min_year: int = Field(default=2018, ge=2000, le=2025)
+    min_year: int = Field(default=2015, ge=1990, le=2026)
     use_rebel: bool = Field(default=False, description="Run REBEL relation extraction (slower)")
     use_cache: bool = Field(default=True, description="Use cached results if available")
 
